@@ -8,6 +8,9 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.16x-009688?logo=fastapi&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue)
 ![Tests](https://img.shields.io/badge/tests-pytest%20%C2%B7%20no%20API%20keys%20needed-success)
+[![Live demo](https://img.shields.io/badge/live%20demo-onrender.com-46E3B7?logo=render&logoColor=white)](https://erp-agent-u7bv.onrender.com/)
+
+**Live demo:** [erp-agent-u7bv.onrender.com](https://erp-agent-u7bv.onrender.com/) · [API docs](https://erp-agent-u7bv.onrender.com/docs). Free tier: the first request after idle time takes about 40 seconds to wake the service.
 
 ## Demo
 
@@ -355,7 +358,7 @@ The Docker image is self-contained: it seeds SQLite on first start and listens o
 1. Push the repo to GitHub.
 2. On render.com: **New + → Blueprint**, select the repo. `render.yaml` defines the service (Docker runtime, free plan, `/health` check).
 3. In the service's **Environment** tab paste `GROQ_API_KEY` (free). Any other key you add (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) appears in the UI dropdown automatically.
-4. Deploy. The UI is at `https://erp-agent-<id>.onrender.com/`, Swagger at `/docs`.
+4. Deploy. The UI is at `https://<service-name>.onrender.com/`, Swagger at `/docs` (this repo runs at https://erp-agent-u7bv.onrender.com/).
 
 Notes for the free tier: the service sleeps after 15 minutes without traffic (first request takes ~30 s), and the disk is ephemeral, so the ERP is reseeded on every deploy. Railway, Fly.io and Hugging Face Spaces (Docker) work the same way with the same env vars; for persistence switch `DATABASE_URL` to a hosted Postgres.
 
