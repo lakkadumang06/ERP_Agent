@@ -14,7 +14,7 @@
 
 ## Demo
 
-![ERP-Agent demo](docs/demo.gif)
+![ERP-Agent web UI](docs/ui.png)
 
 A clean purchase order goes straight into the ERP:
 
@@ -114,7 +114,7 @@ Also: PDF and text input in English and German (Rechnung, Bestellung, Menge, Lie
 macOS / Linux:
 
 ```bash
-git clone https://github.com/<your-user>/erp-agent.git && cd erp-agent
+git clone https://github.com/lakkadumang06/ERP_Agent.git && cd ERP_Agent
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env                 # add OPENAI_API_KEY and/or ANTHROPIC_API_KEY
@@ -127,7 +127,7 @@ docker compose up --build            # same API in a container
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/<your-user>/erp-agent.git; cd erp-agent
+git clone https://github.com/lakkadumang06/ERP_Agent.git; cd ERP_Agent
 python -m venv .venv; .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 Copy-Item .env.example .env          # add OPENAI_API_KEY and/or ANTHROPIC_API_KEY
@@ -148,7 +148,7 @@ Once installed, this is all you need each time (one terminal).
 **macOS / Linux**
 
 ```bash
-cd erp-agent
+cd ERP_Agent
 source .venv/bin/activate    # prompt now starts with (.venv)
 python -m app.seed           # optional: reset the demo database
 make run                     # http://localhost:8000/
@@ -157,7 +157,7 @@ make run                     # http://localhost:8000/
 **Windows PowerShell**
 
 ```powershell
-cd erp-agent
+cd ERP_Agent
 .\.venv\Scripts\Activate.ps1
 python -m app.seed
 uvicorn app.api:app --reload --port 8000
@@ -319,7 +319,7 @@ erp-agent/
 │   ├── api.py           # FastAPI + web UI (app/static)
 │   └── mcp_server.py    # optional MCP server (read-only tools)
 ├── data/sample_docs/    # 10 documents (6 clean, 4 with errors) + 3 PDF versions
-├── docs/                # architecture.md, demo.gif, ui.png
+├── docs/                # architecture.md, ui.png
 ├── evals/               # dataset.json, run_evals.py, results.md
 ├── scripts/             # run_cli.py, make_pdfs.py
 ├── tests/               # pytest, fake chat model, no API keys
@@ -373,4 +373,4 @@ Notes for the free tier: the service sleeps after 15 minutes without traffic (fi
 ## Author
 
 **Umang Lakkad**, Business Information Systems student, working student in full-stack and AI.
-[LinkedIn](https://www.linkedin.com/in/your-profile) · umanglakkad06@gmail.com
+[LinkedIn](https://www.linkedin.com/in/umang-lakkad-923212299) · umanglakkad06@gmail.com
