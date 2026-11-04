@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>ERP-Agent · Document to Order</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css?v=5" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/">
+        <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 12 4 7.5M12 12l8-4.5M12 12v9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></span>
+        <span class="brand-text">
+          <span class="brand-name">ERP-Agent</span>
+          <span class="brand-tag">Invoices &amp; purchase orders → validated ERP orders</span>
+        </span>
+      </a>
+      <nav class="nav">
+        <a href="/docs" target="_blank" rel="noopener">API docs</a>
+        <a href="https://github.com/lakkadumang06/ERP_Agent" target="_blank" rel="noopener">GitHub</a>
+        <span id="health" class="status-chip" title="API status"><i></i>checking…</span>
+      </nav>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- ================= pipeline tracker ================= -->
+    <section class="pipeline card" aria-label="Agent pipeline">
+      <ol id="pipeline">
+        <li data-node="load_document"><span class="dot"></span><b>Load</b><small>PDF / text</small></li>
+        <li data-node="extract"><span class="dot"></span><b>Extract</b><small>LLM · structured output</small></li>
+        <li data-node="rule_check"><span class="dot"></span><b>Rule check</b><small>totals · fields</small></li>
+        <li data-node="erp_check"><span class="dot"></span><b>ERP check</b><small>agent · tool calls</small></li>
+        <li data-node="human_review"><span class="dot"></span><b>Review</b><small>human-in-the-loop</small></li>
+        <li data-node="save_order"><span class="dot"></span><b>Save</b><small>order + stock</small></li>
+      </ol>
+    </section>
+
+    <!-- ================= 1 · input ================= -->
+    <section class="card" id="input-card" aria-labelledby="h-input">
+      <div class="card-head">
+        <h2 id="h-input"><span class="step">1</span>Submit a document</h2>
+      </div>
+
+      <div class="tabs" role="tablist" aria-label="Input mode">
+        <button class="tab active" data-tab="upload" role="tab" aria-selected="true">Upload</button>
+        <button class="tab" data-tab="paste" role="tab" aria-selected="false">Paste text</button>
+        <button class="tab" data-tab="sample" role="tab" aria-selected="false">Samples</button>
+      </div>
+
+      <div id="tab-upload" class="tab-panel active" role="tabpanel">
+        <label id="dropzone" class="dropzone" for="file-input">
+          <input id="file-input" type="file" accept=".pdf,.txt,.md" hidden />
+          <span class="drop-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0-4 4m4-4 4 4M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <strong>Drop a PDF or .txt here</strong>
+          <span>or tap to choose a file · English or German</span>
+          <em id="file-name"></em>
+        </label>
+      </div>
+
+      <div id="tab-paste" class="tab-panel" role="tabpanel">
+        <textarea id="text-input" rows="12" placeholder="Paste the invoice or purchase order text (English or German)…" spellcheck="false"></textarea>
+      </div>
+
+      <div id="tab-sample" class="tab-panel" role="tabpanel">
+        <p class="hint">Clean documents save directly; error documents stop for review.</p>
+        <div id="sample-list" class="sample-grid" role="listbox" aria-label="Sample documents"></div>
+      </div>
+
+      <div class="actions">
+        <label class="field">
+          <span>LLM provider</span>
+          <select id="provider" aria-label="LLM provider">
+            <option value="">default (.env)</option>
+          </select>
+        </label>
+        <button id="submit" class="btn btn-primary btn-wide">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m0 0-5-5m5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Process document
+        </button>
+      </div>
+    </section>
+
+    <!-- ================= 2 · result ================= -->
+    <section class="card" id="result-card" aria-labelledby="h-result" aria-live="polite">
+      <div class="card-head">
+        <h2 id="h-result"><span class="step">2</span>Result</h2>
+        <span id="elapsed" class="hint mono"></span>
+      </div>
+
+      <div id="result-empty" class="empty">
+        <div class="empty-art" aria-hidden="true">
+          <span>📄</span><span>→</span><span>🤖</span><span>→</span><span>✅</span>
+        </div>
+        <p><strong>No document processed yet.</strong></p>
+        <p class="hint">The agent extracts the data, checks totals, customer, SKUs, stock and prices against the ERP, then saves the order or asks you to approve it.</p>
+      </div>
+
+      <div id="result-busy" class="busy" hidden>
+        <div class="spinner" aria-hidden="true"></div>
+        <p id="busy-text">Processing…</p>
+        <p class="hint">Local models take 1–2 minutes; hosted ones a few seconds.</p>
+      </div>
+
+      <div id="result" hidden>
+        <div id="banner" class="banner">
+          <span id="status-icon" class="banner-icon" aria-hidden="true"></span>
+          <div>
+            <div id="status-pill" class="pill"></div>
+            <p id="status-text"></p>
+          </div>
+        </div>
+
+        <div id="document-block">
+          <dl class="meta">
+            <div><dt>Document</dt><dd id="doc-number" class="mono"></dd></div>
+            <div><dt>Type</dt><dd id="doc-type"></dd></div>
+            <div><dt>Customer</dt><dd id="doc-customer"></dd></div>
+            <div><dt>Date</dt><dd id="doc-date"></dd></div>
+          </dl>
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr><th>SKU</th><th>Description</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Line total</th></tr></thead>
+              <tbody id="doc-lines"></tbody>
+              <tfoot><tr><td colspan="4">Stated total</td><td class="num" id="doc-total"></td></tr></tfoot>
+            </table>
+          </div>
+        </div>
+
+        <div id="issues-block" hidden>
+          <h3>Issues found</h3>
+          <ul id="issues" class="issues"></ul>
+        </div>
+
+        <div id="review-block" class="review" hidden>
+          <div>
+            <strong>Human review required</strong>
+            <p class="hint">Approve to save the order anyway, or reject it. Approval still cannot bypass stock or unknown SKUs.</p>
+          </div>
+          <div class="actions">
+            <button id="approve" class="btn btn-success">Approve &amp; save</button>
+            <button id="reject" class="btn btn-danger">Reject</button>
+          </div>
+        </div>
+
+        <details class="raw"><summary>Agent log &amp; raw JSON</summary>
+          <ol id="result-log" class="log"></ol>
+          <pre id="raw-json"></pre>
+        </details>
+      </div>
+    </section>
+
+    <!-- ================= 3 · ERP ================= -->
+    <section class="card wide" aria-labelledby="h-erp">
+      <div class="card-head">
+        <h2 id="h-erp"><span class="step">3</span>ERP state</h2>
+        <div class="stats">
+          <span class="stat"><b id="stat-orders">–</b>orders</span>
+          <span class="stat"><b id="stat-products">–</b>products</span>
+          <span class="stat warn"><b id="stat-low">–</b>low stock</span>
+          <button id="refresh" class="btn btn-ghost btn-sm">↻ Refresh</button>
+        </div>
+      </div>
+      <div class="split">
+        <div>
+          <h3>Orders</h3>
+          <div class="table-wrap">
+            <table class="table compact">
+              <thead><tr><th>#</th><th>Customer</th><th>Document</th><th>Lines</th><th class="num">Total</th></tr></thead>
+              <tbody id="orders"></tbody>
+            </table>
+          </div>
+        </div>
+        <div>
+          <h3>Products &amp; stock</h3>
+          <div class="table-wrap tall">
+            <table class="table compact">
+              <thead><tr><th>SKU</th><th>Name</th><th class="num">Price</th><th class="num">Stock</th></tr></thead>
+              <tbody id="products"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">ERP-Agent · LangChain + LangGraph · FastAPI · built by Umang Lakkad</footer>
+  <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
+  <script src="/static/app.js?v=5"></script>
+</body>
+</html>
