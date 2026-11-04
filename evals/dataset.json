@@ -1,0 +1,270 @@
+[
+  {
+    "id": "po_001",
+    "file": "data/sample_docs/po_001.txt",
+    "expected_issue_codes": [],
+    "expected": {
+      "customer_name": "Shree Ganesh Jewels",
+      "document_number": "PO-2026-0113",
+      "currency": "EUR",
+      "stated_total": 705.0,
+      "lines": [
+        {
+          "sku": "JWL-001",
+          "quantity": 10,
+          "unit_price": 24.5
+        },
+        {
+          "sku": "JWL-004",
+          "quantity": 20,
+          "unit_price": 12.5
+        },
+        {
+          "sku": "JWL-008",
+          "quantity": 15,
+          "unit_price": 14.0
+        }
+      ]
+    }
+  },
+  {
+    "id": "po_002",
+    "file": "data/sample_docs/po_002.txt",
+    "expected_issue_codes": [],
+    "expected": {
+      "customer_name": "Rhein Textil Handel",
+      "document_number": "B-2026-0311",
+      "currency": "EUR",
+      "stated_total": 1000.0,
+      "lines": [
+        {
+          "sku": "TXT-001",
+          "quantity": 20,
+          "unit_price": 21.0
+        },
+        {
+          "sku": "TXT-005",
+          "quantity": 50,
+          "unit_price": 4.8
+        },
+        {
+          "sku": "TXT-004",
+          "quantity": 100,
+          "unit_price": 3.4
+        }
+      ]
+    }
+  },
+  {
+    "id": "po_003",
+    "file": "data/sample_docs/po_003.txt",
+    "expected_issue_codes": [],
+    "expected": {
+      "customer_name": "Lotus Boutique",
+      "document_number": "PO-2026-0522",
+      "currency": "EUR",
+      "stated_total": 459.0,
+      "lines": [
+        {
+          "sku": "TXT-003",
+          "quantity": 5,
+          "unit_price": 39.0
+        },
+        {
+          "sku": "TXT-008",
+          "quantity": 10,
+          "unit_price": 15.0
+        },
+        {
+          "sku": "TXT-002",
+          "quantity": 12,
+          "unit_price": 9.5
+        }
+      ]
+    }
+  },
+  {
+    "id": "po_004",
+    "file": "data/sample_docs/po_004.txt",
+    "expected_issue_codes": [],
+    "expected": {
+      "customer_name": "Schwaben Stoffe GmbH",
+      "document_number": "B-2026-0727",
+      "currency": "EUR",
+      "stated_total": 802.0,
+      "lines": [
+        {
+          "sku": "TXT-007",
+          "quantity": 80,
+          "unit_price": 5.5
+        },
+        {
+          "sku": "TXT-004",
+          "quantity": 50,
+          "unit_price": 3.4
+        },
+        {
+          "sku": "TXT-005",
+          "quantity": 40,
+          "unit_price": 4.8
+        }
+      ]
+    }
+  },
+  {
+    "id": "inv_001",
+    "file": "data/sample_docs/inv_001.txt",
+    "expected_issue_codes": [],
+    "expected": {
+      "customer_name": "Spice Bite Snacks",
+      "document_number": "INV-2026-0207",
+      "currency": "EUR",
+      "stated_total": 1040.0,
+      "lines": [
+        {
+          "sku": "SNK-001",
+          "quantity": 200,
+          "unit_price": 1.2
+        },
+        {
+          "sku": "SNK-004",
+          "quantity": 300,
+          "unit_price": 1.8
+        },
+        {
+          "sku": "SNK-006",
+          "quantity": 100,
+          "unit_price": 2.6
+        }
+      ]
+    }
+  },
+  {
+    "id": "inv_002",
+    "file": "data/sample_docs/inv_002.txt",
+    "expected_issue_codes": [],
+    "expected": {
+      "customer_name": "Bayerische Feinkost GmbH",
+      "document_number": "RE-2026-0418",
+      "currency": "EUR",
+      "stated_total": 576.0,
+      "lines": [
+        {
+          "sku": "SNK-005",
+          "quantity": 120,
+          "unit_price": 2.1
+        },
+        {
+          "sku": "SNK-008",
+          "quantity": 20,
+          "unit_price": 9.8
+        },
+        {
+          "sku": "SNK-009",
+          "quantity": 80,
+          "unit_price": 1.6
+        }
+      ]
+    }
+  },
+  {
+    "id": "err_wrong_total",
+    "file": "data/sample_docs/err_wrong_total.txt",
+    "expected_issue_codes": [
+      "document_total_mismatch"
+    ],
+    "expected": {
+      "customer_name": "Nordlicht Schmuck",
+      "document_number": "PO-2026-0705",
+      "currency": "EUR",
+      "stated_total": 487.0,
+      "lines": [
+        {
+          "sku": "JWL-002",
+          "quantity": 10,
+          "unit_price": 18.0
+        },
+        {
+          "sku": "JWL-005",
+          "quantity": 30,
+          "unit_price": 6.9
+        }
+      ]
+    }
+  },
+  {
+    "id": "err_unknown_sku",
+    "file": "data/sample_docs/err_unknown_sku.txt",
+    "expected_issue_codes": [
+      "unknown_sku"
+    ],
+    "expected": {
+      "customer_name": "Hansa Heimtextil",
+      "document_number": "PO-2026-0812",
+      "currency": "EUR",
+      "stated_total": 235.0,
+      "lines": [
+        {
+          "sku": "TXT-006",
+          "quantity": 5,
+          "unit_price": 32.0
+        },
+        {
+          "sku": "TXT-099",
+          "quantity": 10,
+          "unit_price": 7.5
+        }
+      ]
+    }
+  },
+  {
+    "id": "err_over_stock",
+    "file": "data/sample_docs/err_over_stock.txt",
+    "expected_issue_codes": [
+      "insufficient_stock"
+    ],
+    "expected": {
+      "customer_name": "Saurashtra Silver Works",
+      "document_number": "PO-2026-0919",
+      "currency": "EUR",
+      "stated_total": 1726.0,
+      "lines": [
+        {
+          "sku": "JWL-006",
+          "quantity": 25,
+          "unit_price": 58.0
+        },
+        {
+          "sku": "JWL-005",
+          "quantity": 40,
+          "unit_price": 6.9
+        }
+      ]
+    }
+  },
+  {
+    "id": "err_unknown_customer",
+    "file": "data/sample_docs/err_unknown_customer.txt",
+    "expected_issue_codes": [
+      "unknown_customer"
+    ],
+    "expected": {
+      "customer_name": "Golden Palm Trading LLC",
+      "document_number": "INV-2026-1004",
+      "currency": "EUR",
+      "stated_total": 416.0,
+      "lines": [
+        {
+          "sku": "JWL-003",
+          "quantity": 4,
+          "unit_price": 69.0
+        },
+        {
+          "sku": "JWL-008",
+          "quantity": 10,
+          "unit_price": 14.0
+        }
+      ]
+    }
+  }
+]
