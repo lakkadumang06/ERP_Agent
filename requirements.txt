@@ -1,0 +1,33 @@
+# --- LLM / agent stack ---
+langchain==1.4.7
+langchain-core==1.7.3
+langchain-openai==1.7.3
+langchain-anthropic==1.7.7
+langchain-google-genai==4.4.3
+langgraph==1.2.19
+langsmith==0.14.17
+
+# --- data & validation ---
+pydantic==2.14.2
+pydantic-settings==2.16.2
+sqlalchemy==2.1.6
+
+# --- API ---
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+python-multipart==0.0.33
+
+# --- documents ---
+pypdf==6.21.4
+reportlab==5.1.0          # only used by scripts/make_pdfs.py to generate the sample PDFs
+
+# --- utilities ---
+python-dotenv==1.2.4
+httpx==0.28.1             # FastAPI TestClient
+
+# --- tests & lint ---
+pytest==9.2.0
+ruff==0.17.3
+
+# --- optional: MCP server (python -m app.mcp_server) ---
+mcp==2.3.0
