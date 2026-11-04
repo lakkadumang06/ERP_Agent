@@ -1,0 +1,16 @@
+BESTELLUNG / PURCHASE ORDER
+
+Bestellnummer:  PO-2026-0812
+Datum:          12.08.2026
+Kunde:          Hansa Heimtextil
+                Am Wall 110, 28195 Bremen, Deutschland
+Lieferant:      Nova Trade Hub GmbH
+Währung:        EUR
+
+Pos  Art.-Nr.   Bezeichnung              Menge   Einzelpreis    Gesamt
+1    TXT-006    Wool Throw Blanket           5        32,00    160,00
+2    TXT-099    Silk Pillow Case            10         7,50     75,00
+
+                                           Summe (EUR):      235,00
+
+Lieferung bitte bis 15.09.2026. Kontakt: bestellung@hansa-heimtextil.example

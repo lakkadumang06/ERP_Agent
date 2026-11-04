@@ -1,0 +1,17 @@
+BESTELLUNG / PURCHASE ORDER
+
+Bestellnummer:  B-2026-0727
+Datum:          27.07.2026
+Kunde:          Schwaben Stoffe GmbH
+                Königstraße 28, 70173 Stuttgart, Deutschland
+Lieferant:      Nova Trade Hub GmbH
+Währung:        EUR
+
+Pos  Art.-Nr.   Bezeichnung                    Menge   Einzelpreis    Gesamt
+1    TXT-007    Khadi Kurta Fabric (per metre)    80         5,50    440,00
+2    TXT-004    Jute Tote Bag                     50         3,40    170,00
+3    TXT-005    Block Print Cushion Cover         40         4,80    192,00
+
+                                                Summe (EUR):       802,00
+
+Bitte Lieferschein und Rechnung per E-Mail an einkauf@schwaben-stoffe.example

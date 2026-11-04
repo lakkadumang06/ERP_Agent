@@ -1,0 +1,23 @@
+NOVA TRADE HUB GmbH
+Hansaallee 12, 40549 Düsseldorf | USt-IdNr. DE123456789
+
+RECHNUNG
+
+Rechnungsnummer:  RE-2026-0418
+Rechnungsdatum:   18.04.2026
+Kunde:            Bayerische Feinkost GmbH
+                  Viktualienmarkt 3, 80331 München, Deutschland
+Ihre Bestellung:  BF-2026-77
+Lieferschein:     LS-2026-0415
+Währung:          EUR
+
+Pos  Art.-Nr.   Bezeichnung              Menge   Einzelpreis    Gesamt
+1    SNK-005    Khakhra Methi 200g         120         2,10    252,00
+2    SNK-008    Dry Fruit Mix 500g          20         9,80    196,00
+3    SNK-009    Chai Masala 50g             80         1,60    128,00
+
+Nettobetrag:                                                    576,00
+USt. 0% (innergemeinschaftliche Lieferung):                       0,00
+Gesamtsumme (EUR):                                              576,00
+
+Zahlbar innerhalb von 14 Tagen ohne Abzug.

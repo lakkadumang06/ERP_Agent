@@ -1,0 +1,23 @@
+NOVA TRADE HUB GmbH
+Hansaallee 12, 40549 Düsseldorf, Germany
+VAT ID: DE123456789
+
+INVOICE
+
+Invoice No.:    INV-2026-0207
+Invoice Date:   2026-02-07
+Customer:       Spice Bite Snacks
+                Plot 18, GIDC Estate, Ahmedabad 382445, Gujarat, India
+Customer PO:    SBS/PO/0197
+Currency:       EUR
+
+Pos  Article    Description                  Qty    Price     Total
+ 1   SNK-001    Masala Peanuts 200g          200     1.20    240.00
+ 2   SNK-004    Mukhwas Mix 100g             300     1.80    540.00
+ 3   SNK-006    Bhujia Sev 400g              100     2.60    260.00
+
+Net amount:                                                 1,040.00
+VAT 0% (export, Art. 146 VAT Directive):                        0.00
+Invoice total (EUR):                                        1,040.00
+
+Payable within 30 days to IBAN DE89 3704 0044 0532 0130 00.

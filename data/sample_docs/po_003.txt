@@ -1,0 +1,18 @@
+PURCHASE ORDER
+
+PO Number:    PO-2026-0522
+Date:         2026-05-22
+Buyer:        Lotus Boutique
+              Alkapuri Road, Vadodara 390007, Gujarat, India
+Supplier:     Nova Trade Hub GmbH, Düsseldorf, Germany
+Currency:     EUR
+Ship via:     Air cargo, DAP Vadodara
+
+Item  SKU       Description                 Qty   Unit Price   Amount
+1     TXT-003   Handloom Cotton Saree         5       39.00    195.00
+2     TXT-008   Embroidered Dupatta          10       15.00    150.00
+3     TXT-002   Linen Table Runner           12        9.50    114.00
+
+                                               Total (EUR):   459.00
+
+Please confirm availability by email. Authorised: S. Agarwal

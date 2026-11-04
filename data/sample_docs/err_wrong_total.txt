@@ -1,0 +1,16 @@
+PURCHASE ORDER / BESTELLUNG
+
+PO No.:         PO-2026-0705
+Date:           2026-07-05
+Customer:       Nordlicht Schmuck
+                Mönckebergstraße 9, 20095 Hamburg, Germany
+Supplier:       Nova Trade Hub GmbH
+Currency:       EUR
+
+Pos  SKU       Description               Menge   Einzelpreis   Betrag
+1    JWL-002   Silver Anklet Pair           10        18.00    180.00
+2    JWL-005   Oxidised Silver Ring         30         6.90    207.00
+
+                                            Gesamtsumme (EUR):  487.00
+
+Bitte Lieferung bis Ende Juli. Kontakt: einkauf@nordlicht-schmuck.example

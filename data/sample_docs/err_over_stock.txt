@@ -1,0 +1,16 @@
+PURCHASE ORDER
+
+PO Number:      PO-2026-0919
+Date:           2026-09-19
+Buyer:          Saurashtra Silver Works
+                Diamond Chowk, Bhavnagar 364001, Gujarat, India
+Supplier:       Nova Trade Hub GmbH, Düsseldorf, Germany
+Currency:       EUR
+
+Item  SKU       Description                 Qty   Unit Price    Amount
+1     JWL-006   Temple Jewellery Choker      25       58.00   1450.00
+2     JWL-005   Oxidised Silver Ring         40        6.90    276.00
+
+                                               Total (EUR):  1726.00
+
+Urgent for the Diwali season, please confirm the delivery date.

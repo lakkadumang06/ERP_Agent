@@ -1,0 +1,20 @@
+PURCHASE ORDER
+
+PO Number:      PO-2026-0113
+Date:           2026-01-13
+Buyer:          Shree Ganesh Jewels
+                Ring Road, Surat 395002, Gujarat, India
+                GSTIN: 24AAACS1234F1Z5
+Supplier:       Nova Trade Hub GmbH, Düsseldorf, Germany
+Currency:       EUR
+Delivery:       Sea freight to Nhava Sheva port within 30 days
+
+Item  SKU       Description                 Qty   Unit Price   Amount
+1     JWL-001   Gold Plated Bangle Set       10       24.50    245.00
+2     JWL-004   Pearl Drop Earrings          20       12.50    250.00
+3     JWL-008   Meenakari Jhumka             15       14.00    210.00
+
+                                                Total (EUR):   705.00
+
+Payment terms: 50% advance, balance against shipping documents.
+Authorised signatory: R. Patel

@@ -1,0 +1,19 @@
+BESTELLUNG
+
+Bestellnummer:  B-2026-0311
+Datum:          11.03.2026
+Kunde:          Rhein Textil Handel
+                Aachener Str. 220, 50931 Köln, Deutschland
+Lieferant:      Nova Trade Hub GmbH, Düsseldorf
+Währung:        EUR
+Lieferung:      Frei Haus, Lieferzeit 10 Werktage, Lieferschein beilegen
+
+Pos  Art.-Nr.   Bezeichnung                   Menge   Einzelpreis   Gesamt
+1    TXT-001    Cotton Bed Sheet Double          20        21,00    420,00
+2    TXT-005    Block Print Cushion Cover        50         4,80    240,00
+3    TXT-004    Jute Tote Bag                   100         3,40    340,00
+
+                                                Summe (EUR):     1.000,00
+
+Zahlungsbedingungen: 30 Tage netto.
+Mit freundlichen Grüßen, Einkauf – M. Weber

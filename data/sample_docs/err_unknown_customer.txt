@@ -1,0 +1,15 @@
+NOVA TRADE HUB GmbH – INVOICE / RECHNUNG
+
+Invoice No.:    INV-2026-1004
+Date:           2026-10-04
+Customer:       Golden Palm Trading LLC
+                Deira Souk, P.O. Box 11223, Dubai, United Arab Emirates
+Currency:       EUR
+
+Pos  SKU       Description                 Qty   Unit price    Amount
+1    JWL-003   Kundan Necklace Set           4       69.00     276.00
+2    JWL-008   Meenakari Jhumka             10       14.00     140.00
+
+Total (EUR):                                                 416.00
+
+Payment: advance by bank transfer before dispatch.
