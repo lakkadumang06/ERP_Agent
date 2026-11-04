@@ -298,6 +298,8 @@ Paste the table from `evals/results.md` between the markers above after running 
 
 **Why the LLM never calls `create_order`?** Writing into an order book is irreversible in practice. The model only gets the three read-only tools; the single write happens in the `save_order` node after validation and, if needed, human approval. `create_order` is atomic, so even an approved order with an unknown SKU or insufficient stock is refused.
 
+**Why a hosted model instead of a local one?** I started with a local model through Ollama, because it is free and keeps documents on my own machine. On my laptop, though, one document took far too long: extraction plus the agent's tool-calling loop made several model calls, and each one was slow on local hardware. For a review workflow that a user waits on, that was not usable, so I switched to Gemini via its API for fast responses, and kept the model-agnostic `get_llm()` layer so the provider is one setting. A local model remains a valid option where data must not leave the company; it would need a GPU server instead of a laptop.
+
 **Why `json_schema` structured output?** Both vendors offer native constrained decoding. It is more reliable than prompting for JSON and avoids forced tool calls, which the current Anthropic models reject. The Pydantic field descriptions double as extraction instructions.
 
 **Limitations.** `MemorySaver` forgets paused runs on restart; use a SQLite or Postgres checkpointer in production. PDF reading is text-based, so scanned documents need OCR first. Customer matching is `difflib` fuzzy matching, fine for a demo but a real system would use master-data services. One currency (EUR) throughout.
