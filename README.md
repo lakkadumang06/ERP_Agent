@@ -7,6 +7,7 @@
 ![LangGraph](https://img.shields.io/badge/LangGraph-1.x-FF6F00)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.16x-009688?logo=fastapi&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue)
+[![CI](https://github.com/lakkadumang06/ERP_Agent/actions/workflows/ci.yml/badge.svg)](https://github.com/lakkadumang06/ERP_Agent/actions/workflows/ci.yml)
 ![Tests](https://img.shields.io/badge/tests-pytest%20%C2%B7%20no%20API%20keys%20needed-success)
 [![Live demo](https://img.shields.io/badge/live%20demo-onrender.com-46E3B7?logo=render&logoColor=white)](https://erp-agent-u7bv.onrender.com/)
 
@@ -87,7 +88,8 @@ flowchart TD
     D -->|no issues| F[save_order<br/>create_order, stock reduced]
     D -->|issues| E[human_review<br/>LangGraph interrupt]
     D -->|extraction failed| X([END · error])
-    E -->|approve| F
+    E -->|approve, ERP unchanged| F
+    E -->|approve, but ERP drifted| E
     E -->|reject| Y([END · rejected])
     F --> Z([END · saved])
 ```
@@ -102,6 +104,7 @@ Every run is checkpointed by `thread_id` with `MemorySaver`, so a run paused at 
 | `PurchaseDocument` extracted with `with_structured_output(method="json_schema")`, one retry on schema error | Structured outputs | `app/extract.py`, `app/schemas.py` |
 | Agent bound to three read-only `@tool`s, hand-written loop with max 8 iterations, structured verdict | Tool calling | `app/tools.py`, `app/graph.py` |
 | `interrupt()` with the document and issues, resume with `Command` | Human-in-the-loop | `app/graph.py` |
+| Snapshot at proposal time, "then vs now" at review time, approval only against the version the human saw | Stale-proposal protection | `app/recheck.py`, `app/graph.py` |
 | `MemorySaver` keyed by `thread_id`, one graph instance behind the API | Checkpointing | `app/api.py` |
 | Runs tagged `provider:<name>` with model metadata | LangSmith tracing | `app/graph.py` |
 | Field / line accuracy, issue detection, false alarms, latency, cost per provider | Evals | `evals/run_evals.py` |
@@ -229,15 +232,84 @@ curl -s -X POST http://localhost:8000/documents -H "Content-Type: application/js
 }
 ```
 
-Human decision:
+Before deciding, the approver fetches the current view. The ERP is re-read now, and `recheck` shows the values at proposal time, the values now and the drift between them:
+
+```bash
+curl -s http://localhost:8000/documents/0b7c5a7e-8e1f-4e1d-a3a2-1f6d2b7c9e55
+```
+
+```json
+{
+  "status": "needs_review",
+  "recheck": {
+    "snapshot_at": "2026-11-10T09:02:11+00:00",
+    "checked_at": "2026-11-10T10:14:38+00:00",
+    "snapshot": {"customer": {"found": true, "id": 7, "name": "Nordlicht Schmuck"}, "lines": [{"sku": "JWL-002", "found": true, "unit_price_catalogue": 18.0, "stock": 60}, {"sku": "JWL-005", "found": true, "unit_price_catalogue": 6.9, "stock": 120}]},
+    "current":  {"customer": {"found": true, "id": 7, "name": "Nordlicht Schmuck"}, "lines": [{"sku": "JWL-002", "found": true, "unit_price_catalogue": 20.0, "stock": 60}, {"sku": "JWL-005", "found": true, "unit_price_catalogue": 6.9, "stock": 120}]},
+    "drift": [{"field": "price", "sku": "JWL-002", "value_at_proposal": 18.0, "value_now": 20.0, "severity": "warn", "message": "Catalogue price of JWL-002 changed from 18.00 to 20.00."}],
+    "drift_hash": "3f9c1b2a7d4e5f60",
+    "blocked": false
+  },
+  "...": "..."
+}
+```
+
+Human decision, approving against the version actually seen:
 
 ```bash
 curl -s -X POST http://localhost:8000/documents/0b7c5a7e-8e1f-4e1d-a3a2-1f6d2b7c9e55/review \
-  -H "Content-Type: application/json" -d '{"approve": true}'
+  -H "Content-Type: application/json" -d '{"approve": true, "seen_drift_hash": "3f9c1b2a7d4e5f60"}'
 # → {"status": "saved", "order_id": 2, ...}
+# If the ERP changed again in between: {"status": "needs_re_review", "recheck": {...new drift...}}
 ```
 
 Other endpoints: `GET /health`, `GET /providers` (configured LLM providers), `GET /orders` (orders with lines), `GET /products` (catalogue with stock). Interactive docs at `/docs`.
+
+## Approval re-check: why the approver sees "then vs now"
+
+Human approval has its own timing gap. An order can wait in the review queue for an hour, and by then a price or a stock level may have changed. The approver would then sign off on data that was only correct when the proposal was drafted. Stock was already safe (`create_order` re-checks it inside the transaction), but price and customer data were not, and the review screen showed a snapshot from extraction time without saying so.
+
+Since v1.1 the graph closes that gap with deterministic code only (no LLM involved):
+
+1. **Snapshot at proposal time.** `erp_check` stores the catalogue price and stock of every SKU, the matched customer and a UTC timestamp in the graph state.
+2. **Fresh view at review time.** `compare_with_current()` in `app/recheck.py` re-reads the ERP through the same read-only tools and lists every difference as a drift item. `block`: stock is now below the quantity, the customer is missing, a SKU vanished. `warn`: the catalogue price moved by more than `RECHECK_PRICE_TOLERANCE` (default 0.5 %), or stock dropped but still covers the order.
+3. **Both shown side by side.** The review screen renders "At proposal" vs "Now" with changed cells highlighted and a banner when there is drift. `GET /documents/{thread_id}` returns the same data.
+4. **Approve against a version.** The approval carries the `drift_hash` of the view the human looked at. The graph compares again at approval time: new drift the approver did not see returns `needs_re_review` and asks again; blocking drift is never saved.
+5. **Save guard.** `save_order` compares one last time right before `create_order`. The stock check inside the transaction stays the final guard.
+
+```mermaid
+sequenceDiagram
+    actor Approver
+    participant UI
+    participant API as FastAPI
+    participant Graph as LangGraph
+    participant ERP as ERP (SQL)
+
+    Graph->>ERP: erp_check: find_customer, check_stock, get_product_price
+    Graph->>Graph: store erp_snapshot (prices, stock, customer, 09:02 UTC)
+    Graph-->>API: interrupt: document, issues, snapshot, current, drift
+    Note over ERP: 10:00 a colleague raises the price of JWL-002
+    Approver->>UI: opens the review at 10:14
+    UI->>API: GET /documents/{thread_id}
+    API->>ERP: compare_with_current (read-only)
+    API-->>UI: snapshot vs current, drift [price JWL-002 warn], drift_hash
+    UI-->>Approver: "At proposal 18.00 · Now 20.00" highlighted
+    Approver->>UI: Approve
+    UI->>API: POST /review {approve: true, seen_drift_hash}
+    API->>Graph: Command(resume=...)
+    Graph->>ERP: compare_with_current again
+    alt drift unchanged and nothing blocks
+        Graph->>ERP: save_order: last re-check, then create_order (atomic)
+        Graph-->>UI: status saved
+    else new drift or block
+        Graph-->>UI: status needs_re_review + new drift (nothing saved)
+        UI-->>Approver: table refreshes, asks again
+    end
+```
+
+Try it: process `err_wrong_total.txt`, then change a price in the database while the order waits, for example with `sqlite3 data/erp.db "UPDATE products SET unit_price = 20 WHERE sku = 'JWL-002'"`, and click **Re-check now** or **Approve**.
+
+Inspired by a discussion on LinkedIn about the timing gap in human approval.
 
 ## Switching providers
 
@@ -317,6 +389,7 @@ erp-agent/
 │   ├── tools.py         # @tool find_customer, check_stock, get_product_price, create_order
 │   ├── extract.py       # load_document(), extract_document()
 │   ├── validate.py      # deterministic checks → list[Issue]
+│   ├── recheck.py       # approval re-check: snapshot, compare_with_current(), drift hash
 │   ├── graph.py         # LangGraph StateGraph, build_graph(), run_document()
 │   ├── api.py           # FastAPI + web UI (app/static)
 │   └── mcp_server.py    # optional MCP server (read-only tools)
@@ -325,7 +398,8 @@ erp-agent/
 ├── evals/               # dataset.json, run_evals.py, results.md
 ├── scripts/             # run_cli.py, make_pdfs.py
 ├── tests/               # pytest, fake chat model, no API keys
-├── Dockerfile · docker-compose.yml · render.yaml · Makefile · requirements.txt · .env.example
+├── .github/workflows/ci.yml   # ruff + pytest on Python 3.11
+├── Dockerfile · docker-compose.yml · render.yaml · Makefile · requirements.txt · .env.example · CHANGELOG.md
 ```
 
 ## Use the ERP tools from Claude Desktop (MCP)

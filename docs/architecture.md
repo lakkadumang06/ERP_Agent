@@ -15,8 +15,9 @@ flowchart TD
     D -->|route: no issues| F[save_order<br/>create_order → stock reduced]
     D -->|route: issues| E[human_review<br/>interrupt payload: document + issues]
     D -->|route: extraction failed| X([END · status = error])
-    E -->|Command resume approve=true| F
+    E -->|Command resume approve=true,<br/>ERP unchanged since the approver's view| F
     E -->|Command resume approve=false| Y([END · status = rejected])
+    E -->|approve, but ERP drifted or blocks| E
     F --> Z([END · status = saved])
 
     classDef llm fill:#eef3ff,stroke:#4c6ef5;
@@ -42,7 +43,10 @@ writes to the database.
 | `needs_human` | `bool` | `erp_check` |
 | `approved` | `bool \| None` | `human_review` |
 | `order_id` | `int \| None` | `save_order` |
-| `status` | `saved \| needs_review \| rejected \| error` | several nodes |
+| `erp_snapshot` | `dict` (`ErpSnapshot`) | `erp_check` |
+| `recheck` | `dict` (`RecheckResult`) | `human_review`, `save_order` |
+| `approved_drift_hash` | `str \| None` | `human_review` |
+| `status` | `saved \| needs_review \| needs_re_review \| rejected \| error` | several nodes |
 | `log` | `list[str]` (additive reducer) | every node |
 
 ## Three layers of validation
@@ -60,6 +64,25 @@ writes to the database.
 Any issue, including a warning, routes the document to `human_review`. The
 save node calls `create_order`, which is atomic: approval cannot write an
 order with an unknown SKU or insufficient stock.
+
+## Approval re-check (v1.1)
+
+Human approval has its own timing gap: a proposal can wait in the queue for an
+hour while prices, stock or the customer record change. `app/recheck.py`
+closes it without any LLM involvement:
+
+1. `erp_check` calls `take_snapshot(document)` and stores the result in the
+   state (`erp_snapshot`: price and stock per SKU, matched customer, UTC time).
+2. `human_review` calls `compare_with_current(document, snapshot)` before it
+   interrupts, so the payload (and `GET /documents/{thread_id}`) carries
+   `snapshot`, `current`, `drift`, `drift_hash` and `blocked`.
+3. The approver resumes with `{"approve": true, "seen_drift_hash": ...}`. The
+   node compares again. If the drift now hashes differently from what the
+   approver saw, or any item has severity `block`, the node returns status
+   `needs_re_review` and the conditional edge routes back to `human_review`,
+   which interrupts again with the fresh view.
+4. `save_order` compares one last time against the approved hash right before
+   `create_order`; the stock check inside the transaction stays the final guard.
 
 ## Runtime pieces
 
