@@ -112,3 +112,46 @@ def test_web_ui_and_samples_are_served(client_factory, clean_doc: PurchaseDocume
         assert "JWL-001" in client.get("/samples/po_001.txt").text
         assert client.get("/samples/../../.env").status_code == 404
         assert client.get("/samples/nope.txt").status_code == 404
+
+
+def test_review_shows_then_vs_now_and_refuses_unseen_drift(
+    client_factory, wrong_total_doc: PurchaseDocument
+) -> None:
+    from sqlalchemy import select
+
+    from app.db import Product, get_session
+
+    with client_factory(FakeERPModel(extracted=wrong_total_doc)) as client:
+        body = client.post("/documents", json={"text": "x"}).json()
+        thread_id = body["thread_id"]
+        assert body["status"] == "needs_review" and body["recheck"]["drift"] == []
+        assert body["recheck"]["snapshot"]["lines"][0] == {
+            "sku": "JWL-001",
+            "found": True,
+            "unit_price_catalogue": 24.5,
+            "stock": 40,
+        }
+
+        with get_session() as session:  # price changes while the order waits
+            session.scalar(select(Product).where(Product.sku == "JWL-001")).unit_price = 30.0
+
+        view = client.get(f"/documents/{thread_id}").json()
+        assert view["status"] == "needs_review"
+        drift = view["recheck"]["drift"]
+        assert len(drift) == 1 and drift[0]["field"] == "price" and drift[0]["value_now"] == 30.0
+        assert view["recheck"]["current"]["lines"][0]["unit_price_catalogue"] == 30.0
+
+        # Approving without the hash = "I saw no drift": refused, nothing saved.
+        refused = client.post(f"/documents/{thread_id}/review", json={"approve": True}).json()
+        assert refused["status"] == "needs_re_review" and refused["order_id"] is None
+        assert len(refused["recheck"]["drift"]) == 1
+        assert client.get("/orders").json() == []
+
+        # Approving against the version actually seen: saved.
+        seen = refused["recheck"]["drift_hash"]
+        saved = client.post(
+            f"/documents/{thread_id}/review", json={"approve": True, "seen_drift_hash": seen}
+        ).json()
+        assert saved["status"] == "saved" and saved["order_id"] is not None
+        assert client.get(f"/documents/{thread_id}").json()["status"] == "saved"
+        assert client.get("/documents/nope").status_code == 404

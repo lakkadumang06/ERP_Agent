@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     langsmith_api_key: str | None = None
     langsmith_project: str = "erp-agent"
 
+    # --- approval re-check -------------------------------------------------
+    recheck_price_tolerance: float = Field(
+        default=0.005,
+        description="Relative catalogue-price change (0.005 = 0.5 %) that counts as drift.",
+    )
+
     log_level: str = "INFO"
 
     def api_key_for(self, provider: str) -> str | None:

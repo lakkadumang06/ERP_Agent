@@ -4,7 +4,9 @@
     python scripts/run_cli.py data/sample_docs/err_over_stock.txt --provider anthropic
 
 Runs the graph on one document and prints a readable summary. If the run
-pauses for review it asks "Approve? [y/N]" and resumes the graph.
+pauses for review it shows what changed in the ERP since the proposal ("then
+vs now"), asks "Approve? [y/N]" and resumes the graph. If the ERP changes
+again before the approval lands, the question is asked once more.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # run without inst
 from app.config import PROVIDERS, configure_logging, get_settings  # noqa: E402
 from app.db import init_db  # noqa: E402
 from app.graph import build_graph, pending_interrupt, resume_document, run_document  # noqa: E402
-from app.schemas import ProcessResult  # noqa: E402
+from app.schemas import ProcessResult, RecheckResult  # noqa: E402
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -54,6 +56,18 @@ def print_summary(result: ProcessResult, log: list[str]) -> None:
         print(f"  {entry}")  # noqa: T201
 
 
+def print_recheck(recheck: RecheckResult | None) -> None:
+    """Print the drift between proposal time and now, if any."""
+    if recheck is None:
+        return
+    if not recheck.drift:
+        print(f"\nERP re-check: no change since {recheck.snapshot_at}.")  # noqa: T201
+        return
+    print(f"\nERP changed since the proposal ({recheck.snapshot_at}):")  # noqa: T201
+    for item in recheck.drift:
+        print(f"  - [{item.severity}] {item.message}")  # noqa: T201
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     configure_logging()
@@ -67,9 +81,15 @@ def main(argv: list[str] | None = None) -> int:
     result, state = run_document(args.document, provider, thread_id, graph=graph)
     print_summary(result, state.get("log", []))
 
-    if pending_interrupt(state) is not None:
-        approve = args.yes or input("\nApprove? [y/N] ").strip().lower() in {"y", "yes"}
-        result, state = resume_document(graph, thread_id, approve)
+    while pending_interrupt(state) is not None:
+        print_recheck(result.recheck)
+        if result.recheck is not None and result.recheck.blocked:
+            print("\nA blocking change prevents saving; the order can only be rejected.")  # noqa: T201
+            approve = False
+        else:
+            approve = args.yes or input("\nApprove? [y/N] ").strip().lower() in {"y", "yes"}
+        seen = result.recheck.drift_hash if result.recheck is not None else None
+        result, state = resume_document(graph, thread_id, approve, seen_drift_hash=seen)
         print("\nAfter review:")  # noqa: T201
         for entry in state.get("log", [])[-2:]:
             print(f"  {entry}")  # noqa: T201

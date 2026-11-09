@@ -12,7 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DocumentType = Literal["invoice", "purchase_order"]
 Severity = Literal["warning", "error"]
-ProcessStatus = Literal["saved", "needs_review", "rejected", "error"]
+ProcessStatus = Literal["saved", "needs_review", "needs_re_review", "rejected", "error"]
+DriftSeverity = Literal["warn", "block"]
 
 
 class OrderLine(BaseModel):
@@ -100,6 +101,68 @@ class ValidationResult(BaseModel):
     customer_id: int | None = Field(default=None, description="Matched ERP customer id.")
 
 
+# --- approval re-check -----------------------------------------------------
+
+
+class LineSnapshot(BaseModel):
+    """Catalogue price and stock of one SKU at a point in time."""
+
+    sku: str
+    found: bool = Field(description="False if the SKU was not in the catalogue.")
+    unit_price_catalogue: float | None = None
+    stock: int | None = None
+
+
+class CustomerSnapshot(BaseModel):
+    """The ERP customer the document was matched to (or not)."""
+
+    found: bool
+    id: int | None = None
+    name: str | None = None
+
+
+class ErpSnapshot(BaseModel):
+    """ERP values at one moment, for the customer and SKUs of one document."""
+
+    snapshot_at: str = Field(description="UTC timestamp, ISO 8601.")
+    customer: CustomerSnapshot
+    lines: list[LineSnapshot]
+
+    def line(self, sku: str) -> LineSnapshot | None:
+        """Return the snapshot of ``sku`` or ``None`` if it was not recorded."""
+        return next((line for line in self.lines if line.sku == sku), None)
+
+
+class Drift(BaseModel):
+    """One difference between the proposal snapshot and the ERP now."""
+
+    field: Literal["customer", "price", "stock", "sku"]
+    sku: str | None = None
+    value_at_proposal: str | int | float | None
+    value_now: str | int | float | None
+    severity: DriftSeverity = Field(description="'block' can never be saved; 'warn' needs a look.")
+    message: str = Field(description="One sentence for the reviewer.")
+
+
+class RecheckResult(BaseModel):
+    """Outcome of ``compare_with_current``: then, now and what changed."""
+
+    snapshot_at: str
+    checked_at: str
+    snapshot: ErpSnapshot
+    current: ErpSnapshot
+    drift: list[Drift] = Field(default_factory=list)
+    drift_hash: str = Field(description="Fingerprint of ``drift`` (see ``recheck.hash_drift``).")
+    blocked: bool = Field(description="True if any drift item has severity 'block'.")
+
+    def summary(self) -> str:
+        """Short text for logs, e.g. ``"2 drift item(s): price JWL-001, stock JWL-004"``."""
+        if not self.drift:
+            return "no drift"
+        parts = ", ".join(f"{d.field} {d.sku}" if d.sku else d.field for d in self.drift)
+        return f"{len(self.drift)} drift item(s): {parts}"
+
+
 class ProcessResult(BaseModel):
     """What the CLI and the API return for one processed document."""
 
@@ -109,6 +172,13 @@ class ProcessResult(BaseModel):
     document: PurchaseDocument | None = None
     issues: list[Issue] = Field(default_factory=list)
     log: list[str] = Field(default_factory=list, description="One entry per graph node that ran.")
+    recheck: RecheckResult | None = Field(
+        default=None,
+        description=(
+            "Approval re-check: ERP values at proposal time vs now, plus the drift between "
+            "them. Present while a run waits for review and after a review decision."
+        ),
+    )
 
 
 class AgentVerdict(BaseModel):
@@ -151,9 +221,17 @@ class ProviderOut(BaseModel):
 
 
 class ReviewRequest(BaseModel):
-    """Body for ``POST /review/{thread_id}``."""
+    """Body for ``POST /documents/{thread_id}/review``."""
 
     approve: bool
+    seen_drift_hash: str | None = Field(
+        default=None,
+        description=(
+            "The ``recheck.drift_hash`` the approver looked at. Omit it to claim 'I saw no "
+            "drift'. Approval is refused with status needs_re_review when the ERP has drifted "
+            "further since that view."
+        ),
+    )
 
 
 class OrderLineOut(BaseModel):

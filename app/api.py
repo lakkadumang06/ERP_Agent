@@ -2,7 +2,8 @@
 
     GET  /health
     POST /documents                      multipart file OR JSON {text, provider}
-    POST /documents/{thread_id}/review   body {"approve": bool}
+    GET  /documents/{thread_id}          fresh "then vs now" view of a paused run
+    POST /documents/{thread_id}/review   body {"approve": bool, "seen_drift_hash": str | null}
     GET  /orders
     GET  /products
     GET  /providers                      configured LLM providers (feeds the UI dropdown)
@@ -31,7 +32,7 @@ from app import __version__
 from app.config import PROVIDERS, configure_logging, get_settings
 from app.db import Order, OrderLine, Product, get_session, init_db
 from app.extract import SUPPORTED_SUFFIXES, load_document
-from app.graph import build_graph, resume_document, run_document
+from app.graph import build_graph, resume_document, review_view, run_document
 from app.llm import available_providers, model_name_for
 from app.schemas import (
     OrderLineOut,
@@ -189,16 +190,39 @@ async def process_document(request: Request) -> ProcessResult:
     return result
 
 
+@app.get("/documents/{thread_id}", response_model=ProcessResult, tags=["agent"])
+async def get_document(thread_id: str) -> ProcessResult:
+    """Current state of a run. For a paused run the ERP is re-read now.
+
+    ``recheck`` holds the values at proposal time (``snapshot``), the values
+    now (``current``) and the ``drift`` between them. Send ``drift_hash`` back
+    as ``seen_drift_hash`` when approving.
+    """
+    result = await run_in_threadpool(review_view, get_graph(), thread_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"unknown thread_id {thread_id}")
+    return result
+
+
 @app.post("/documents/{thread_id}/review", response_model=ProcessResult, tags=["agent"])
 async def review_document(thread_id: str, body: ReviewRequest) -> ProcessResult:
-    """Resume a run that is waiting for human approval."""
+    """Resume a run that is waiting for human approval.
+
+    The ERP is re-checked before saving. If it drifted since the approver's
+    view (``seen_drift_hash``), or a change blocks the order, nothing is saved
+    and the response has ``status="needs_re_review"`` with the new ``recheck``.
+    """
     graph = get_graph()
-    snapshot = await run_in_threadpool(graph.get_state, {"configurable": {"thread_id": thread_id}})
-    if not snapshot.values:
+    checkpoint = await run_in_threadpool(
+        graph.get_state, {"configurable": {"thread_id": thread_id}}
+    )
+    if not checkpoint.values:
         raise HTTPException(status_code=404, detail=f"unknown thread_id {thread_id}")
-    if not snapshot.next:
+    if not checkpoint.next:
         raise HTTPException(status_code=409, detail="this run is not waiting for review")
-    result, _ = await run_in_threadpool(resume_document, graph, thread_id, body.approve)
+    result, _ = await run_in_threadpool(
+        resume_document, graph, thread_id, body.approve, body.seen_drift_hash
+    )
     return result
 
 
