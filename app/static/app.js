@@ -19,11 +19,14 @@ const NODES = ["load_document", "extract", "rule_check", "erp_check", "human_rev
 const STATUS = {
   saved: ["✅", "Order saved in the ERP and stock reduced."],
   needs_review: ["🧑‍⚖️", "The agent found issues. A human decides."],
+  needs_re_review: ["🔄", "The ERP changed after you looked. Check the new values, then decide again."],
   rejected: ["⛔", "Rejected by the reviewer. Nothing was saved."],
   error: ["⚠️", "Processing failed. See the issues below."],
 };
 
-let activeTab = "upload", selectedFile = null, selectedSample = null, currentThread = null, timer = null, toastTimer = null;
+const REVIEW_STATES = new Set(["needs_review", "needs_re_review"]);
+
+let activeTab = "upload", selectedFile = null, selectedSample = null, currentThread = null, currentRecheck = null, timer = null, toastTimer = null;
 
 function toast(message, kind = "") {
   const el = $("toast");
@@ -92,12 +95,26 @@ $("submit").addEventListener("click", async () => {
 });
 $("approve").addEventListener("click", () => review(true));
 $("reject").addEventListener("click", () => review(false));
+$("recheck").addEventListener("click", recheckNow);
 async function review(approve) {
   if (!currentThread) return;
+  // Approve against the version on screen: the server refuses if the ERP drifted further.
+  const seen_drift_hash = currentRecheck ? currentRecheck.drift_hash : null;
   await runRequest(
-    () => fetch(`/documents/${currentThread}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approve }) }),
-    approve ? "Saving order" : "Rejecting", false
+    () => fetch(`/documents/${currentThread}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approve, seen_drift_hash }) }),
+    approve ? "Re-checking ERP & saving" : "Rejecting", false
   );
+}
+async function recheckNow() {
+  if (!currentThread) return;
+  try {
+    const res = await fetch(`/documents/${currentThread}`);
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    render(body);
+    const n = body.recheck ? body.recheck.drift.length : 0;
+    toast(n ? `${n} change(s) in the ERP since the proposal.` : "No change in the ERP since the proposal.", n ? "" : "ok");
+  } catch (e) { toast(e.message, "error"); }
 }
 
 async function runRequest(makeRequest, busyText, fullPipeline) {
@@ -120,7 +137,7 @@ async function runRequest(makeRequest, busyText, fullPipeline) {
 }
 
 function setBusy(busy, text, fullPipeline) {
-  ["submit", "approve", "reject"].forEach((id) => ($(id).disabled = busy));
+  ["submit", "approve", "reject", "recheck"].forEach((id) => ($(id).disabled = busy));
   clearInterval(timer);
   if (!busy) { $("result-busy").hidden = true; return; }
   $("result-empty").hidden = true; $("result").hidden = true; $("result-busy").hidden = false;
@@ -154,21 +171,23 @@ function setPipeline(log, status) {
     const issues = /(\d+) issue\(s\)/.exec(rest);
     let cls = failed ? (rest.includes("skipped") ? "skip" : "fail") : "done";
     if (issues && Number(issues[1]) > 0) cls = "warn";
-    if (node === "human_review") cls = rest.includes("rejected") ? "fail" : "done";
+    if (node === "human_review") cls = rest.includes("rejected") ? "fail" : rest.includes("refused") ? "warn" : "done";
     markPipeline(node, cls);
   });
   if (status === "needs_review" && !ran.has("human_review")) markPipeline("human_review", "active");
-  if (status === "needs_review") markPipeline("save_order", "");
+  if (status === "needs_re_review") markPipeline("human_review", "active");
+  if (REVIEW_STATES.has(status)) markPipeline("save_order", "");
 }
 
 // ---------- render ----------
 function render(r) {
-  currentThread = r.status === "needs_review" ? r.thread_id : null;
+  currentThread = REVIEW_STATES.has(r.status) ? r.thread_id : null;
+  currentRecheck = r.recheck || null;
   $("result-empty").hidden = true; $("result-busy").hidden = true; $("result").hidden = false;
   const [icon, text] = STATUS[r.status] || ["•", r.status];
   $("banner").className = `banner ${r.status}`;
   $("status-icon").textContent = icon;
-  $("status-pill").textContent = r.status.replace("_", " ");
+  $("status-pill").textContent = r.status.replaceAll("_", " ");
   $("status-text").textContent = r.order_id ? `${text} Order #${r.order_id}.` : text;
 
   const d = r.document;
@@ -184,11 +203,56 @@ function render(r) {
   }
   $("issues-block").hidden = !r.issues.length;
   $("issues").innerHTML = r.issues.map((i) => `<li class="${i.severity}"><code>${esc(i.code)}</code><span>${esc(i.message)}</span></li>`).join("");
-  $("review-block").hidden = r.status !== "needs_review";
+  renderRecheck(r);
   $("result-log").innerHTML = (r.log || []).map((l) => `<li>${esc(l)}</li>`).join("");
   $("raw-json").textContent = JSON.stringify(r, null, 2);
   setPipeline(r.log || [], r.status);
   if (isNarrow()) $("result-card").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ---------- approval re-check: "at proposal" vs "now" ----------
+function renderRecheck(r) {
+  const rc = r.recheck, inReview = REVIEW_STATES.has(r.status);
+  $("recheck-block").hidden = !rc;
+  $("review-block").hidden = !inReview;
+  $("recheck").hidden = !inReview;
+  if (!rc) return;
+  const d = r.document, drift = rc.drift || [];
+  const changed = new Set(drift.map((x) => `${x.field}:${x.sku || ""}`));
+  const cell = (val, key, cls = "num") => `<td class="${cls}${changed.has(key) ? " changed" : ""}">${val}</td>`;
+  const price = (l) => (l && l.found ? fmt(l.unit_price_catalogue) : "–");
+  const stock = (l) => (l && l.found ? l.stock : "–");
+  const qty = {};
+  (d ? d.lines : []).forEach((l) => { if (l.sku) qty[l.sku] = (qty[l.sku] || 0) + l.quantity; });
+  const rows = rc.snapshot.lines.map((then) => {
+    const now = rc.current.lines.find((x) => x.sku === then.sku);
+    const missing = then.found && now && !now.found;
+    return `<tr><td><code>${esc(then.sku)}</code>${missing ? ' <span class="tag error">removed</span>' : ""}</td><td class="num">${qty[then.sku] ?? ""}</td>`
+      + cell(price(then), "", "num then") + cell(price(now), `price:${then.sku}`, "num now")
+      + cell(stock(then), "", "num then") + cell(stock(now), `stock:${then.sku}`, "num now") + "</tr>";
+  });
+  const cName = (c) => (c && c.found ? esc(c.name) : '<span class="tag error">not found</span>');
+  rows.unshift(`<tr><td>Customer</td><td></td>${cell(cName(rc.snapshot.customer), "", "then")}${cell(cName(rc.current.customer), "customer:", "now")}<td class="then"></td><td class="now"></td></tr>`);
+  $("recheck-rows").innerHTML = rows.join("");
+  $("recheck-times").textContent = `snapshot ${rc.snapshot_at} · checked ${rc.checked_at} · drift hash ${rc.drift_hash}`;
+
+  const banner = $("drift-banner");
+  banner.hidden = !drift.length;
+  banner.className = `drift-banner ${rc.blocked ? "block" : "warn"}`;
+  $("drift-icon").textContent = rc.blocked ? "⛔" : "⚠️";
+  $("drift-title").textContent = rc.blocked
+    ? "The ERP changed since the proposal and the order can no longer be saved."
+    : `${drift.length} change(s) in the ERP since the proposal. Check the highlighted cells before approving.`;
+  $("drift-list").innerHTML = drift.map((x) => `<li class="${x.severity}"><code>${esc(x.severity)}</code><span>${esc(x.message)}</span></li>`).join("");
+
+  $("approve").disabled = rc.blocked;
+  $("approve").title = rc.blocked ? "A blocking change prevents saving" : "";
+  $("review-title").textContent = r.status === "needs_re_review" ? "Look again, then decide" : "Human review required";
+  $("review-hint").textContent = rc.blocked
+    ? "A blocking change (stock, customer or SKU) means this order cannot be saved as it stands. Re-check later or reject it."
+    : r.status === "needs_re_review"
+      ? "Your approval was not applied because the ERP changed after you looked. The table shows today's values; approve again if they are still acceptable."
+      : "Approve to save the order anyway, or reject it. Approval still cannot bypass stock or unknown SKUs, and it only counts for the ERP values shown above.";
 }
 
 // ---------- ERP state ----------

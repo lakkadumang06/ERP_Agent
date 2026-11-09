@@ -126,10 +126,11 @@ select { padding: .6rem .75rem; border: 1px solid var(--line); border-radius: 12
 .banner { display: flex; align-items: center; gap: .8rem; padding: .85rem 1rem; border-radius: 12px; margin-bottom: 1rem; border: 1px solid var(--line); background: var(--soft); }
 .banner.saved { background: var(--ok-soft); border-color: var(--ok); } .banner.needs_review { background: var(--warn-soft); border-color: var(--warn); }
 .banner.rejected, .banner.error { background: var(--bad-soft); border-color: var(--bad); }
+.banner.needs_re_review { background: var(--brand-soft); border-color: var(--brand); }
 .banner-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--card); font-size: 1.2rem; flex: none; }
 .banner p { margin: .1rem 0 0; font-size: .9rem; }
 .pill { display: inline-block; padding: .18rem .6rem; border-radius: 999px; font-size: .72rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; white-space: nowrap; background: var(--card); }
-.saved .pill { color: var(--ok); } .needs_review .pill { color: var(--warn); } .rejected .pill, .error .pill { color: var(--bad); }
+.saved .pill { color: var(--ok); } .needs_review .pill { color: var(--warn); } .rejected .pill, .error .pill { color: var(--bad); } .needs_re_review .pill { color: var(--brand); }
 
 .meta { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem .9rem; margin: 0 0 .9rem; }
 @media (min-width: 720px) { .meta { grid-template-columns: repeat(4, 1fr); } }
@@ -160,6 +161,21 @@ select { padding: .6rem .75rem; border: 1px solid var(--line); border-radius: 12
 .issues li { display: flex; gap: .6rem; align-items: flex-start; padding: .6rem .8rem; border-radius: 12px; border: 1px solid var(--warn); background: var(--warn-soft); font-size: .88rem; overflow-wrap: anywhere; }
 .issues li.error { border-color: var(--bad); background: var(--bad-soft); }
 .issues li code { background: var(--card); color: inherit; font-weight: 700; }
+/* ---------- approval re-check: then vs now ---------- */
+.recheck { margin-bottom: 1rem; }
+.recheck .card-head { margin-bottom: .5rem; } .recheck .card-head h3 { margin: 0; }
+.recheck-table { min-width: 520px; }
+.recheck-table thead th.then, .recheck-table td.then { color: var(--muted); }
+.recheck-table thead th.now { color: var(--ink); }
+.recheck-table td.changed { background: var(--warn-soft); color: var(--warn); font-weight: 700; box-shadow: inset 3px 0 0 var(--warn); }
+.drift-banner.block ~ .table-wrap td.changed { background: var(--bad-soft); color: var(--bad); box-shadow: inset 3px 0 0 var(--bad); }
+.drift-banner { display: flex; gap: .7rem; align-items: flex-start; padding: .75rem .9rem; border-radius: 12px; margin-bottom: .6rem; border: 1px solid var(--warn); background: var(--warn-soft); font-size: .9rem; }
+.drift-banner.block { border-color: var(--bad); background: var(--bad-soft); }
+.drift-banner > span { font-size: 1.2rem; line-height: 1.2; }
+.drift-list { list-style: none; margin: .35rem 0 0; padding: 0; display: grid; gap: .25rem; font-size: .85rem; }
+.drift-list li { display: flex; gap: .5rem; align-items: baseline; overflow-wrap: anywhere; }
+.drift-list li code { background: var(--card); color: var(--warn); font-weight: 700; } .drift-list li.block code { color: var(--bad); }
+.recheck-times { margin-top: .4rem; font-size: .72rem; }
 .review { display: flex; flex-direction: column; gap: .5rem; border: 1px solid var(--warn); background: var(--warn-soft); border-radius: var(--radius); padding: 1rem; margin-bottom: 1rem; }
 .review .actions { margin-top: .25rem; }
 @media (min-width: 720px) { .review { flex-direction: row; align-items: center; justify-content: space-between; } .review .actions { flex: none; } }
