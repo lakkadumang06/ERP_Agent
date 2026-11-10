@@ -103,6 +103,31 @@ class ValidationResult(BaseModel):
 
 # --- approval re-check -----------------------------------------------------
 
+SnapshotScalar = str | int | float | bool | None
+
+
+class SnapshotValue(BaseModel):
+    """One ERP value a proposal depends on, with its provenance.
+
+    ``key`` is stable across snapshots (``"customer.credit_limit"``,
+    ``"price:JWL-001"``), ``source`` names the table and field (or API) the
+    value came from, and ``read_at`` is the UTC time it was read.
+    """
+
+    key: str
+    label: str = Field(description="Short human label, e.g. 'Credit limit'.")
+    sku: str | None = None
+    value: SnapshotScalar
+    source: str = Field(description="'table.field' or the API that supplied the value.")
+    read_at: str = Field(description="UTC timestamp, ISO 8601.")
+    decision_relevant: bool = Field(
+        default=True,
+        description=(
+            "True for values in the proposal hash (price, customer data). False for "
+            "informational values such as stock, which the save transaction checks itself."
+        ),
+    )
+
 
 class LineSnapshot(BaseModel):
     """Catalogue price and stock of one SKU at a point in time."""
@@ -111,26 +136,46 @@ class LineSnapshot(BaseModel):
     found: bool = Field(description="False if the SKU was not in the catalogue.")
     unit_price_catalogue: float | None = None
     stock: int | None = None
+    row_version: int | None = Field(default=None, description="products.row_version when read.")
 
 
 class CustomerSnapshot(BaseModel):
-    """The ERP customer the document was matched to (or not)."""
+    """The ERP customer the document was matched to (or not), with its master data."""
 
     found: bool
     id: int | None = None
     name: str | None = None
+    status: str | None = None
+    address: str | None = None
+    credit_limit: float | None = None
+    payment_terms: str | None = None
+    row_version: int | None = Field(default=None, description="customers.row_version when read.")
 
 
 class ErpSnapshot(BaseModel):
-    """ERP values at one moment, for the customer and SKUs of one document."""
+    """ERP values at one moment, for the customer and SKUs of one document.
+
+    ``version`` counts the proposals made for one thread (1, 2, ...), and
+    ``snapshot_hash`` fingerprints the decision-relevant ``values``. Approvals
+    carry both, and the save transaction re-reads and compares against them.
+    """
 
     snapshot_at: str = Field(description="UTC timestamp, ISO 8601.")
+    version: int = Field(default=1, ge=1)
+    snapshot_hash: str = Field(
+        default="", description="Fingerprint of the decision-relevant values."
+    )
     customer: CustomerSnapshot
     lines: list[LineSnapshot]
+    values: list[SnapshotValue] = Field(default_factory=list)
 
     def line(self, sku: str) -> LineSnapshot | None:
         """Return the snapshot of ``sku`` or ``None`` if it was not recorded."""
         return next((line for line in self.lines if line.sku == sku), None)
+
+    def value(self, key: str) -> SnapshotValue | None:
+        """Return the recorded value with ``key`` or ``None``."""
+        return next((v for v in self.values if v.key == key), None)
 
 
 class Drift(BaseModel):
@@ -138,10 +183,24 @@ class Drift(BaseModel):
 
     field: Literal["customer", "price", "stock", "sku"]
     sku: str | None = None
-    value_at_proposal: str | int | float | None
-    value_now: str | int | float | None
+    value_at_proposal: SnapshotScalar
+    value_now: SnapshotScalar
     severity: DriftSeverity = Field(description="'block' can never be saved; 'warn' needs a look.")
     message: str = Field(description="One sentence for the reviewer.")
+
+
+class ValueComparison(BaseModel):
+    """One row of the approval screen: a value at proposal time and now."""
+
+    key: str
+    label: str
+    sku: str | None = None
+    at_proposal: SnapshotScalar
+    now: SnapshotScalar
+    source: str
+    read_at: str = Field(description="When the at-proposal value was read (UTC).")
+    changed: bool
+    decision_relevant: bool = True
 
 
 class RecheckResult(BaseModel):
@@ -149,11 +208,23 @@ class RecheckResult(BaseModel):
 
     snapshot_at: str
     checked_at: str
+    proposal_version: int
+    proposal_hash: str
+    expires_at: str
+    expired: bool = Field(description="Older than PROPOSAL_TTL_HOURS: refresh before approving.")
     snapshot: ErpSnapshot
     current: ErpSnapshot
+    values: list[ValueComparison] = Field(default_factory=list)
     drift: list[Drift] = Field(default_factory=list)
-    drift_hash: str = Field(description="Fingerprint of ``drift`` (see ``recheck.hash_drift``).")
+    stale: bool = Field(
+        description="A decision-relevant value (price, customer) changed; refresh before approving."
+    )
     blocked: bool = Field(description="True if any drift item has severity 'block'.")
+
+    @property
+    def needs_refresh(self) -> bool:
+        """The approver must refresh the proposal before an approval can count."""
+        return self.stale or self.blocked or self.expired
 
     def summary(self) -> str:
         """Short text for logs, e.g. ``"2 drift item(s): price JWL-001, stock JWL-004"``."""
@@ -161,6 +232,21 @@ class RecheckResult(BaseModel):
             return "no drift"
         parts = ", ".join(f"{d.field} {d.sku}" if d.sku else d.field for d in self.drift)
         return f"{len(self.drift)} drift item(s): {parts}"
+
+
+class ProposalInfo(BaseModel):
+    """Identity and lifecycle of the proposal the approver is looking at."""
+
+    version: int
+    hash: str
+    created_at: str
+    expires_at: str
+    expired: bool = False
+    stale_reason: str | None = Field(
+        default=None,
+        description="Why the previous version was marked stale (set on versions > 1).",
+    )
+    approved_by: str | None = None
 
 
 class ProcessResult(BaseModel):
@@ -172,6 +258,10 @@ class ProcessResult(BaseModel):
     document: PurchaseDocument | None = None
     issues: list[Issue] = Field(default_factory=list)
     log: list[str] = Field(default_factory=list, description="One entry per graph node that ran.")
+    proposal: ProposalInfo | None = Field(
+        default=None,
+        description="Version, hash and expiry of the current proposal (once erp_check ran).",
+    )
     recheck: RecheckResult | None = Field(
         default=None,
         description=(
@@ -224,14 +314,39 @@ class ReviewRequest(BaseModel):
     """Body for ``POST /documents/{thread_id}/review``."""
 
     approve: bool
-    seen_drift_hash: str | None = Field(
+    proposal_version: int | None = Field(
         default=None,
-        description=(
-            "The ``recheck.drift_hash`` the approver looked at. Omit it to claim 'I saw no "
-            "drift'. Approval is refused with status needs_re_review when the ERP has drifted "
-            "further since that view."
-        ),
+        description="Required for approve=true: the ``proposal.version`` the approver saw.",
     )
+    proposal_hash: str | None = Field(
+        default=None,
+        description="Required for approve=true: the ``proposal.hash`` the approver saw.",
+    )
+    approver: str | None = Field(
+        default=None, max_length=120, description="Who decides (stored in the audit log)."
+    )
+
+
+class RefreshRequest(BaseModel):
+    """Body for ``POST /documents/{thread_id}/refresh``."""
+
+    actor: str | None = Field(default=None, max_length=120)
+
+
+class AuditEntryOut(BaseModel):
+    """One row of ``GET /documents/{thread_id}/audit``."""
+
+    id: int
+    created_at: str
+    thread_id: str
+    proposal_version: int
+    proposal_hash: str
+    event: str
+    actor: str | None
+    reason: str | None
+    order_id: int | None
+    at_proposal: dict | None
+    current: dict | None
 
 
 class OrderLineOut(BaseModel):
@@ -259,4 +374,7 @@ class OrderOut(BaseModel):
     document_number: str | None
     total: float
     status: str
+    thread_id: str | None = None
+    proposal_version: int | None = None
+    approved_by: str | None = None
     lines: list[OrderLineOut]

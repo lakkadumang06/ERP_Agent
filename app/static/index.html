@@ -8,7 +8,7 @@
   <title>ERP-Agent · Document to Order</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=6" />
+  <link rel="stylesheet" href="/static/style.css?v=7" />
 </head>
 <body>
   <header class="topbar">
@@ -139,7 +139,10 @@
 
         <div id="recheck-block" class="recheck" hidden>
           <div class="card-head">
-            <h3>ERP values: at proposal vs now</h3>
+            <div>
+              <h3>ERP values: at proposal vs now</h3>
+              <p id="proposal-meta" class="hint mono"></p>
+            </div>
             <button id="recheck" class="btn btn-ghost btn-sm" title="Re-read the ERP now">↻ Re-check now</button>
           </div>
           <div id="drift-banner" class="drift-banner" hidden>
@@ -152,8 +155,7 @@
           <div class="table-wrap">
             <table class="table compact recheck-table">
               <thead>
-                <tr><th rowspan="2">Item</th><th rowspan="2" class="num">Qty</th><th colspan="2">Catalogue price</th><th colspan="2">Stock</th></tr>
-                <tr><th class="num then">At proposal</th><th class="num now">Now</th><th class="num then">At proposal</th><th class="num now">Now</th></tr>
+                <tr><th>Value</th><th>Source</th><th class="num then">At proposal</th><th class="num now">Now</th><th>Status</th></tr>
               </thead>
               <tbody id="recheck-rows"></tbody>
             </table>
@@ -164,10 +166,12 @@
         <div id="review-block" class="review" hidden>
           <div>
             <strong id="review-title">Human review required</strong>
-            <p id="review-hint" class="hint">Approve to save the order anyway, or reject it. Approval still cannot bypass stock or unknown SKUs, and it only counts for the ERP values shown above.</p>
+            <p id="review-hint" class="hint">Approve to save the order anyway, or reject it. Approval still cannot bypass stock or unknown SKUs, and it only counts for the proposal version shown above.</p>
           </div>
           <div class="actions">
+            <label class="field approver"><span>Approver</span><input id="approver" type="text" placeholder="your name" maxlength="120" autocomplete="name" /></label>
             <button id="approve" class="btn btn-success">Approve &amp; save</button>
+            <button id="refresh-proposal" class="btn btn-primary" hidden>↻ Refresh proposal</button>
             <button id="reject" class="btn btn-danger">Reject</button>
           </div>
         </div>
@@ -215,6 +219,6 @@
 
   <footer class="footer">ERP-Agent · LangChain + LangGraph · FastAPI · built by Umang Lakkad</footer>
   <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
-  <script src="/static/app.js?v=6"></script>
+  <script src="/static/app.js?v=7"></script>
 </body>
 </html>

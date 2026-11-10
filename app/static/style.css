@@ -164,11 +164,26 @@ select { padding: .6rem .75rem; border: 1px solid var(--line); border-radius: 12
 /* ---------- approval re-check: then vs now ---------- */
 .recheck { margin-bottom: 1rem; }
 .recheck .card-head { margin-bottom: .5rem; } .recheck .card-head h3 { margin: 0; }
-.recheck-table { min-width: 520px; }
+.recheck-table { min-width: 560px; }
 .recheck-table thead th.then, .recheck-table td.then { color: var(--muted); }
 .recheck-table thead th.now { color: var(--ink); }
-.recheck-table td.changed { background: var(--warn-soft); color: var(--warn); font-weight: 700; box-shadow: inset 3px 0 0 var(--warn); }
-.drift-banner.block ~ .table-wrap td.changed { background: var(--bad-soft); color: var(--bad); box-shadow: inset 3px 0 0 var(--bad); }
+.recheck-table td.source { color: var(--muted); font-size: .74rem; }
+.recheck-table td.then, .recheck-table td.now { text-align: right; overflow-wrap: anywhere; }
+.recheck-table thead th.then, .recheck-table thead th.now { text-align: right; }
+.recheck-table tr.group td { background: var(--soft); padding-top: .3rem; padding-bottom: .3rem; }
+.recheck-table tr.changed td { background: var(--bad-soft); }
+.recheck-table tr.changed td:first-child { box-shadow: inset 3px 0 0 var(--bad); font-weight: 700; }
+.recheck-table tr.changed td.now { color: var(--bad); font-weight: 700; }
+.recheck-table tr.changed.info td { background: var(--warn-soft); }
+.recheck-table tr.changed.info td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+.recheck-table tr.changed.info td.now { color: var(--warn); }
+.recheck-table .tag { font-size: .66rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; padding: .12rem .45rem; border-radius: 999px; white-space: nowrap; }
+.tag.warn { background: var(--warn-soft); color: var(--warn); }
+#proposal-meta { margin: .15rem 0 0; font-size: .72rem; }
+.review > div:first-child { flex: 1 1 240px; }
+.review .field.approver { min-width: 150px; }
+.review .field.approver input { padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 12px; background: var(--card); min-height: 46px; font: inherit; color: inherit; }
+.review .field.approver input:focus { outline: 2px solid var(--brand); outline-offset: 2px; }
 .drift-banner { display: flex; gap: .7rem; align-items: flex-start; padding: .75rem .9rem; border-radius: 12px; margin-bottom: .6rem; border: 1px solid var(--warn); background: var(--warn-soft); font-size: .9rem; }
 .drift-banner.block { border-color: var(--bad); background: var(--bad-soft); }
 .drift-banner > span { font-size: 1.2rem; line-height: 1.2; }

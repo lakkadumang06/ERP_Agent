@@ -19,14 +19,19 @@ const NODES = ["load_document", "extract", "rule_check", "erp_check", "human_rev
 const STATUS = {
   saved: ["✅", "Order saved in the ERP and stock reduced."],
   needs_review: ["🧑‍⚖️", "The agent found issues. A human decides."],
-  needs_re_review: ["🔄", "The ERP changed after you looked. Check the new values, then decide again."],
+  needs_re_review: ["🔄", "The previous proposal version went stale. This is the refreshed version: check it, then decide again."],
   rejected: ["⛔", "Rejected by the reviewer. Nothing was saved."],
   error: ["⚠️", "Processing failed. See the issues below."],
 };
 
 const REVIEW_STATES = new Set(["needs_review", "needs_re_review"]);
 
-let activeTab = "upload", selectedFile = null, selectedSample = null, currentThread = null, currentRecheck = null, timer = null, toastTimer = null;
+let activeTab = "upload", selectedFile = null, selectedSample = null, currentThread = null, currentRecheck = null, currentProposal = null, timer = null, toastTimer = null;
+
+// Approver name: remembered per browser so the audit log has a name to record.
+try { $("approver").value = localStorage.getItem("erp-agent.approver") || ""; } catch { /* storage blocked */ }
+$("approver").addEventListener("change", () => { try { localStorage.setItem("erp-agent.approver", $("approver").value.trim()); } catch { /* ignore */ } });
+const approver = () => $("approver").value.trim() || null;
 
 function toast(message, kind = "") {
   const el = $("toast");
@@ -95,14 +100,28 @@ $("submit").addEventListener("click", async () => {
 });
 $("approve").addEventListener("click", () => review(true));
 $("reject").addEventListener("click", () => review(false));
+$("refresh-proposal").addEventListener("click", refreshProposal);
 $("recheck").addEventListener("click", recheckNow);
 async function review(approve) {
   if (!currentThread) return;
-  // Approve against the version on screen: the server refuses if the ERP drifted further.
-  const seen_drift_hash = currentRecheck ? currentRecheck.drift_hash : null;
+  // Approve exactly the proposal version on screen: the save transaction re-reads
+  // price, customer and stock and refuses if anything differs from that version.
+  const body = {
+    approve,
+    proposal_version: currentProposal ? currentProposal.version : null,
+    proposal_hash: currentProposal ? currentProposal.hash : null,
+    approver: approver(),
+  };
   await runRequest(
-    () => fetch(`/documents/${currentThread}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ approve, seen_drift_hash }) }),
-    approve ? "Re-checking ERP & saving" : "Rejecting", false
+    () => fetch(`/documents/${currentThread}/review`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+    approve ? `Approving v${body.proposal_version}: re-checking ERP & saving` : "Rejecting", false
+  );
+}
+async function refreshProposal() {
+  if (!currentThread) return;
+  await runRequest(
+    () => fetch(`/documents/${currentThread}/refresh`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ actor: approver() }) }),
+    "Refreshing proposal: rule check & ERP check", false
   );
 }
 async function recheckNow() {
@@ -112,8 +131,8 @@ async function recheckNow() {
     const body = await res.json();
     if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
     render(body);
-    const n = body.recheck ? body.recheck.drift.length : 0;
-    toast(n ? `${n} change(s) in the ERP since the proposal.` : "No change in the ERP since the proposal.", n ? "" : "ok");
+    const n = body.recheck ? body.recheck.values.filter((v) => v.changed).length : 0;
+    toast(n ? `${n} value(s) changed in the ERP since the proposal.` : "No change in the ERP since the proposal.", n ? "" : "ok");
   } catch (e) { toast(e.message, "error"); }
 }
 
@@ -137,7 +156,7 @@ async function runRequest(makeRequest, busyText, fullPipeline) {
 }
 
 function setBusy(busy, text, fullPipeline) {
-  ["submit", "approve", "reject", "recheck"].forEach((id) => ($(id).disabled = busy));
+  ["submit", "approve", "reject", "recheck", "refresh-proposal"].forEach((id) => ($(id).disabled = busy));
   clearInterval(timer);
   if (!busy) { $("result-busy").hidden = true; return; }
   $("result-empty").hidden = true; $("result").hidden = true; $("result-busy").hidden = false;
@@ -171,7 +190,8 @@ function setPipeline(log, status) {
     const issues = /(\d+) issue\(s\)/.exec(rest);
     let cls = failed ? (rest.includes("skipped") ? "skip" : "fail") : "done";
     if (issues && Number(issues[1]) > 0) cls = "warn";
-    if (node === "human_review") cls = rest.includes("rejected") ? "fail" : rest.includes("refused") ? "warn" : "done";
+    if (node === "human_review") cls = rest.includes("rejected") ? "fail" : /refused|stale|expired|refreshed/.test(rest) ? "warn" : "done";
+    if (node === "save_order" && rest.includes("refused")) cls = "warn";
     markPipeline(node, cls);
   });
   if (status === "needs_review" && !ran.has("human_review")) markPipeline("human_review", "active");
@@ -183,6 +203,7 @@ function setPipeline(log, status) {
 function render(r) {
   currentThread = REVIEW_STATES.has(r.status) ? r.thread_id : null;
   currentRecheck = r.recheck || null;
+  currentProposal = r.proposal || null;
   $("result-empty").hidden = true; $("result-busy").hidden = true; $("result").hidden = false;
   const [icon, text] = STATUS[r.status] || ["•", r.status];
   $("banner").className = `banner ${r.status}`;
@@ -211,48 +232,61 @@ function render(r) {
 }
 
 // ---------- approval re-check: "at proposal" vs "now" ----------
+const show = (v, key) => {
+  if (v === null || v === undefined) return '<span class="tag error">not found</span>';
+  if (typeof v === "number") return key.startsWith("stock") ? String(v) : fmt(v);
+  return esc(v);
+};
 function renderRecheck(r) {
-  const rc = r.recheck, inReview = REVIEW_STATES.has(r.status);
+  const rc = r.recheck, p = r.proposal, inReview = REVIEW_STATES.has(r.status);
   $("recheck-block").hidden = !rc;
   $("review-block").hidden = !inReview;
   $("recheck").hidden = !inReview;
   if (!rc) return;
-  const d = r.document, drift = rc.drift || [];
-  const changed = new Set(drift.map((x) => `${x.field}:${x.sku || ""}`));
-  const cell = (val, key, cls = "num") => `<td class="${cls}${changed.has(key) ? " changed" : ""}">${val}</td>`;
-  const price = (l) => (l && l.found ? fmt(l.unit_price_catalogue) : "–");
-  const stock = (l) => (l && l.found ? l.stock : "–");
-  const qty = {};
-  (d ? d.lines : []).forEach((l) => { if (l.sku) qty[l.sku] = (qty[l.sku] || 0) + l.quantity; });
-  const rows = rc.snapshot.lines.map((then) => {
-    const now = rc.current.lines.find((x) => x.sku === then.sku);
-    const missing = then.found && now && !now.found;
-    return `<tr><td><code>${esc(then.sku)}</code>${missing ? ' <span class="tag error">removed</span>' : ""}</td><td class="num">${qty[then.sku] ?? ""}</td>`
-      + cell(price(then), "", "num then") + cell(price(now), `price:${then.sku}`, "num now")
-      + cell(stock(then), "", "num then") + cell(stock(now), `stock:${then.sku}`, "num now") + "</tr>";
+  const values = rc.values || [], changed = values.filter((v) => v.changed);
+  const needsRefresh = rc.stale || rc.blocked || rc.expired;
+
+  $("proposal-meta").textContent = p
+    ? `proposal v${p.version} · hash ${p.hash} · created ${p.created_at} · expires ${p.expires_at}${p.expired ? " (expired)" : ""}`
+    : "";
+
+  // One row per value; customer rows first, then price and stock per SKU.
+  let lastSku = null;
+  const rows = values.map((v) => {
+    const group = v.sku && v.sku !== lastSku ? `<tr class="group"><td colspan="5"><code>${esc(v.sku)}</code></td></tr>` : "";
+    lastSku = v.sku || lastSku;
+    const cls = v.changed ? (v.decision_relevant ? "changed" : "changed info") : "";
+    const status = v.changed
+      ? `<span class="tag ${v.decision_relevant ? "error" : "warn"}">${v.decision_relevant ? "changed" : "changed · checked at save"}</span>`
+      : '<span class="tag clean">unchanged</span>';
+    const num = typeof (v.at_proposal ?? v.now) === "number" ? "num " : "";
+    return group + `<tr class="${cls}"><td>${esc(v.label)}</td><td class="mono source">${esc(v.source)}</td>`
+      + `<td class="${num}then">${show(v.at_proposal, v.key)}</td><td class="${num}now">${show(v.now, v.key)}</td><td>${status}</td></tr>`;
   });
-  const cName = (c) => (c && c.found ? esc(c.name) : '<span class="tag error">not found</span>');
-  rows.unshift(`<tr><td>Customer</td><td></td>${cell(cName(rc.snapshot.customer), "", "then")}${cell(cName(rc.current.customer), "customer:", "now")}<td class="then"></td><td class="now"></td></tr>`);
   $("recheck-rows").innerHTML = rows.join("");
-  $("recheck-times").textContent = `snapshot ${rc.snapshot_at} · checked ${rc.checked_at} · drift hash ${rc.drift_hash}`;
+  $("recheck-times").textContent = `at proposal = read ${rc.snapshot_at} · now = read ${rc.checked_at}`;
 
   const banner = $("drift-banner");
-  banner.hidden = !drift.length;
+  banner.hidden = !(needsRefresh || rc.drift.length);
   banner.className = `drift-banner ${rc.blocked ? "block" : "warn"}`;
-  $("drift-icon").textContent = rc.blocked ? "⛔" : "⚠️";
+  $("drift-icon").textContent = rc.blocked ? "⛔" : rc.expired ? "⏰" : "⚠️";
   $("drift-title").textContent = rc.blocked
-    ? "The ERP changed since the proposal and the order can no longer be saved."
-    : `${drift.length} change(s) in the ERP since the proposal. Check the highlighted cells before approving.`;
-  $("drift-list").innerHTML = drift.map((x) => `<li class="${x.severity}"><code>${esc(x.severity)}</code><span>${esc(x.message)}</span></li>`).join("");
+    ? "The ERP changed since this proposal was drafted and the order can no longer be saved as it stands. Refresh the proposal to see the new checks."
+    : rc.stale
+      ? `${changed.length} value(s) changed since this proposal was drafted. Approval is disabled: refresh the proposal to review today's values.`
+      : rc.expired
+        ? `This proposal expired at ${rc.expires_at}. Refresh it before approving.`
+        : `${changed.length} informational change(s) (stock). Still enough to fulfil the order; stock is checked again when saving.`;
+  $("drift-list").innerHTML = rc.drift.map((x) => `<li class="${x.severity}"><code>${esc(x.severity)}</code><span>${esc(x.message)}</span></li>`).join("");
 
-  $("approve").disabled = rc.blocked;
-  $("approve").title = rc.blocked ? "A blocking change prevents saving" : "";
-  $("review-title").textContent = r.status === "needs_re_review" ? "Look again, then decide" : "Human review required";
-  $("review-hint").textContent = rc.blocked
-    ? "A blocking change (stock, customer or SKU) means this order cannot be saved as it stands. Re-check later or reject it."
-    : r.status === "needs_re_review"
-      ? "Your approval was not applied because the ERP changed after you looked. The table shows today's values; approve again if they are still acceptable."
-      : "Approve to save the order anyway, or reject it. Approval still cannot bypass stock or unknown SKUs, and it only counts for the ERP values shown above.";
+  $("approve").hidden = needsRefresh;
+  $("refresh-proposal").hidden = !needsRefresh;
+  $("review-title").textContent = p && p.version > 1 ? `Proposal v${p.version}: look again, then decide` : "Human review required";
+  $("review-hint").textContent = needsRefresh
+    ? "The values above no longer describe the ERP (or the proposal is too old). Refresh runs the rule check and the ERP check again and creates the next proposal version for you to approve."
+    : p && p.stale_reason
+      ? `Version ${p.version - 1} was marked stale: ${p.stale_reason}. This version was built on today's values; approve it if they are acceptable.`
+      : `Approve to save the order anyway, or reject it. Approval counts for proposal v${p ? p.version : 1} only: the save transaction re-reads price, customer and stock and refuses if anything differs.`;
 }
 
 // ---------- ERP state ----------

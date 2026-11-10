@@ -15,18 +15,49 @@ from app.db import Customer, Product, drop_db, get_engine, get_session, init_db
 
 logger = logging.getLogger(__name__)
 
-# (name, city, country): fictional businesses in Gujarat (IN) and Germany (DE).
-CUSTOMERS: list[tuple[str, str, str]] = [
-    ("Shree Ganesh Jewels", "Surat", "IN"),
-    ("Spice Bite Snacks", "Ahmedabad", "IN"),
-    ("Rhein Textil Handel", "Köln", "DE"),
-    ("Bayerische Feinkost GmbH", "München", "DE"),
-    ("Lotus Boutique", "Vadodara", "IN"),
-    ("Rajkot Munchies", "Rajkot", "IN"),
-    ("Nordlicht Schmuck", "Hamburg", "DE"),
-    ("Hansa Heimtextil", "Bremen", "DE"),
-    ("Saurashtra Silver Works", "Bhavnagar", "IN"),
-    ("Schwaben Stoffe GmbH", "Stuttgart", "DE"),
+# (name, city, country, address, credit limit EUR, payment terms): fictional
+# businesses in Gujarat (IN) and Germany (DE). All are "active"; the agent flags
+# a customer whose status changes to "blocked" or whose credit limit no longer
+# covers the order.
+CUSTOMERS: list[tuple[str, str, str, str, float, str]] = [
+    ("Shree Ganesh Jewels", "Surat", "IN", "12 Ring Road, Surat 395002", 15000.0, "net 30"),
+    (
+        "Spice Bite Snacks",
+        "Ahmedabad",
+        "IN",
+        "Plot 8, GIDC Vatva, Ahmedabad 382445",
+        8000.0,
+        "net 14",
+    ),
+    ("Rhein Textil Handel", "Köln", "DE", "Hohenzollernring 21, 50672 Köln", 25000.0, "net 30"),
+    (
+        "Bayerische Feinkost GmbH",
+        "München",
+        "DE",
+        "Viktualienmarkt 3, 80331 München",
+        12000.0,
+        "net 14",
+    ),
+    ("Lotus Boutique", "Vadodara", "IN", "Alkapuri Main Road, Vadodara 390007", 6000.0, "prepaid"),
+    ("Rajkot Munchies", "Rajkot", "IN", "Kalawad Road, Rajkot 360005", 5000.0, "net 14"),
+    ("Nordlicht Schmuck", "Hamburg", "DE", "Mönckebergstraße 7, 20095 Hamburg", 10000.0, "net 30"),
+    ("Hansa Heimtextil", "Bremen", "DE", "Obernstraße 44, 28195 Bremen", 20000.0, "net 60"),
+    (
+        "Saurashtra Silver Works",
+        "Bhavnagar",
+        "IN",
+        "Diamond Chowk, Bhavnagar 364001",
+        9000.0,
+        "net 30",
+    ),
+    (
+        "Schwaben Stoffe GmbH",
+        "Stuttgart",
+        "DE",
+        "Königstraße 12, 70173 Stuttgart",
+        30000.0,
+        "net 30",
+    ),
 ]
 
 # (sku, name, category, unit price in EUR, stock). Some stocks are deliberately low.
@@ -72,7 +103,18 @@ def seed(engine: Engine | None = None) -> tuple[int, int]:
     drop_db(engine)
     init_db(engine)
     with get_session() as session:
-        session.add_all(Customer(name=n, city=c, country=k) for n, c, k in CUSTOMERS)
+        session.add_all(
+            Customer(
+                name=n,
+                city=c,
+                country=k,
+                address=a,
+                credit_limit=limit,
+                payment_terms=terms,
+                status="active",
+            )
+            for n, c, k, a, limit, terms in CUSTOMERS
+        )
         session.add_all(
             Product(sku=s, name=n, category=c, unit_price=p, stock=st)
             for s, n, c, p, st in PRODUCTS

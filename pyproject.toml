@@ -1,6 +1,6 @@
 [project]
 name = "erp-agent"
-version = "1.1.0"
+version = "1.2.0"
 description = "LangChain + LangGraph agent that turns invoices and purchase orders into validated ERP orders."
 requires-python = ">=3.11"
 readme = "README.md"

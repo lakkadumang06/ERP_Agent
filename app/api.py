@@ -2,8 +2,10 @@
 
     GET  /health
     POST /documents                      multipart file OR JSON {text, provider}
-    GET  /documents/{thread_id}          fresh "then vs now" view of a paused run
-    POST /documents/{thread_id}/review   body {"approve": bool, "seen_drift_hash": str | null}
+    GET  /documents/{thread_id}          fresh "at proposal vs now" view of a paused run
+    POST /documents/{thread_id}/review   body {approve, proposal_version, proposal_hash, approver}
+    POST /documents/{thread_id}/refresh  new proposal version (re-runs the checks)
+    GET  /documents/{thread_id}/audit    audit log of the proposal versions
     GET  /orders
     GET  /products
     GET  /providers                      configured LLM providers (feeds the UI dropdown)
@@ -16,7 +18,9 @@ Interactive docs: http://localhost:8000/docs
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -28,19 +32,21 @@ from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app import __version__
+from app import __version__, audit
 from app.config import PROVIDERS, configure_logging, get_settings
 from app.db import Order, OrderLine, Product, get_session, init_db
 from app.extract import SUPPORTED_SUFFIXES, load_document
-from app.graph import build_graph, resume_document, review_view, run_document
+from app.graph import build_graph, is_waiting, resume_document, review_view, run_document
 from app.llm import available_providers, model_name_for
 from app.schemas import (
+    AuditEntryOut,
     OrderLineOut,
     OrderOut,
     ProcessResult,
     ProcessTextRequest,
     ProductOut,
     ProviderOut,
+    RefreshRequest,
     ReviewRequest,
 )
 
@@ -63,6 +69,12 @@ def set_graph(graph: CompiledStateGraph | None) -> None:
     """Replace the process-wide graph (tests inject one with a fake LLM)."""
     global _graph
     _graph = graph
+
+
+# One lock per review thread: two approve requests for the same proposal (a
+# double click, a retry) are serialised, so the second one sees the saved
+# order and replays it instead of resuming the graph twice.
+_thread_locks: defaultdict[str, threading.Lock] = defaultdict(threading.Lock)
 
 
 @asynccontextmanager
@@ -194,9 +206,10 @@ async def process_document(request: Request) -> ProcessResult:
 async def get_document(thread_id: str) -> ProcessResult:
     """Current state of a run. For a paused run the ERP is re-read now.
 
-    ``recheck`` holds the values at proposal time (``snapshot``), the values
-    now (``current``) and the ``drift`` between them. Send ``drift_hash`` back
-    as ``seen_drift_hash`` when approving.
+    ``recheck.values`` lists every value the proposal depends on with
+    ``at_proposal``, ``now``, ``source`` and ``changed``; ``recheck.stale``,
+    ``blocked`` and ``expired`` say whether it must be refreshed first.
+    ``proposal`` carries the version and hash to send back when approving.
     """
     result = await run_in_threadpool(review_view, get_graph(), thread_id)
     if result is None:
@@ -204,26 +217,91 @@ async def get_document(thread_id: str) -> ProcessResult:
     return result
 
 
+def _review_sync(thread_id: str, body: ReviewRequest) -> ProcessResult:
+    graph = get_graph()
+    with _thread_locks[thread_id]:
+        waiting = is_waiting(graph, thread_id)
+        if waiting is None:
+            raise HTTPException(status_code=404, detail=f"unknown thread_id {thread_id}")
+        if not waiting:
+            # Idempotent replay: the same approval again returns the saved order.
+            current = review_view(graph, thread_id)
+            if (
+                body.approve
+                and current is not None
+                and current.status == "saved"
+                and current.proposal is not None
+                and current.proposal.version == body.proposal_version
+                and current.proposal.hash == body.proposal_hash
+            ):
+                audit.record(
+                    "replayed",
+                    thread_id=thread_id,
+                    proposal_version=current.proposal.version,
+                    proposal_hash=current.proposal.hash,
+                    actor=body.approver,
+                    order_id=current.order_id,
+                )
+                return current
+            raise HTTPException(status_code=409, detail="this run is not waiting for review")
+        result, _ = resume_document(
+            graph,
+            thread_id,
+            action="approve" if body.approve else "reject",
+            proposal_version=body.proposal_version,
+            proposal_hash=body.proposal_hash,
+            actor=body.approver,
+        )
+        return result
+
+
 @app.post("/documents/{thread_id}/review", response_model=ProcessResult, tags=["agent"])
 async def review_document(thread_id: str, body: ReviewRequest) -> ProcessResult:
     """Resume a run that is waiting for human approval.
 
-    The ERP is re-checked before saving. If it drifted since the approver's
-    view (``seen_drift_hash``), or a change blocks the order, nothing is saved
-    and the response has ``status="needs_re_review"`` with the new ``recheck``.
+    An approval must name the ``proposal.version`` and ``proposal.hash`` the
+    approver looked at. The order is saved in one transaction that re-reads
+    price, customer and stock; if anything changed, or the proposal expired,
+    nothing is saved and the response has ``status="needs_re_review"`` with
+    the next proposal version. Repeating the same approval returns the saved
+    order instead of creating a second one.
     """
+    if body.approve and (body.proposal_version is None or not body.proposal_hash):
+        raise HTTPException(
+            status_code=422, detail="approve=true needs proposal_version and proposal_hash"
+        )
+    return await run_in_threadpool(_review_sync, thread_id, body)
+
+
+def _refresh_sync(thread_id: str, actor: str | None) -> ProcessResult:
     graph = get_graph()
-    checkpoint = await run_in_threadpool(
-        graph.get_state, {"configurable": {"thread_id": thread_id}}
-    )
-    if not checkpoint.values:
+    with _thread_locks[thread_id]:
+        waiting = is_waiting(graph, thread_id)
+        if waiting is None:
+            raise HTTPException(status_code=404, detail=f"unknown thread_id {thread_id}")
+        if not waiting:
+            raise HTTPException(status_code=409, detail="this run is not waiting for review")
+        result, _ = resume_document(graph, thread_id, action="refresh", actor=actor)
+        return result
+
+
+@app.post("/documents/{thread_id}/refresh", response_model=ProcessResult, tags=["agent"])
+async def refresh_document(thread_id: str, body: RefreshRequest | None = None) -> ProcessResult:
+    """Create the next proposal version: re-run the rule check and the ERP check.
+
+    Use it when the review screen shows changed values or an expired
+    proposal. The response carries the new ``proposal`` (version + hash) to
+    approve against.
+    """
+    return await run_in_threadpool(_refresh_sync, thread_id, body.actor if body else None)
+
+
+@app.get("/documents/{thread_id}/audit", response_model=list[AuditEntryOut], tags=["agent"])
+async def document_audit(thread_id: str) -> list[AuditEntryOut]:
+    """Audit log of one run: proposals, approvals, saves and stale marks."""
+    if await run_in_threadpool(is_waiting, get_graph(), thread_id) is None:
         raise HTTPException(status_code=404, detail=f"unknown thread_id {thread_id}")
-    if not checkpoint.next:
-        raise HTTPException(status_code=409, detail="this run is not waiting for review")
-    result, _ = await run_in_threadpool(
-        resume_document, graph, thread_id, body.approve, body.seen_drift_hash
-    )
-    return result
+    return await run_in_threadpool(audit.entries_for, thread_id)
 
 
 @app.get("/orders", response_model=list[OrderOut], tags=["erp"])
@@ -247,6 +325,9 @@ def list_orders(limit: int = 50) -> list[OrderOut]:
                 document_number=o.document_number,
                 total=o.total,
                 status=o.status,
+                thread_id=o.thread_id,
+                proposal_version=o.proposal_version,
+                approved_by=o.approved_by,
                 lines=[
                     OrderLineOut(
                         sku=line.product.sku, quantity=line.quantity, unit_price=line.unit_price

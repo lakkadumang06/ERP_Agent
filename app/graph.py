@@ -5,19 +5,25 @@
     START -> load_document -> extract -> rule_check -> erp_check -> route
         no issues     -> save_order -> END          (status "saved")
         issues        -> human_review (interrupt)   (status "needs_review")
-                           approve -> save_order    (status "saved")
-                           reject  -> END           (status "rejected")
-                           ERP drifted since the approver looked
-                                   -> human_review  (status "needs_re_review")
+                           approve v<n> -> save_order          (status "saved")
+                           reject  -> END                      (status "rejected")
+                           refresh, expired, or ERP changed
+                                   -> rule_check -> erp_check  (proposal v<n+1>)
+                                   -> human_review              (status "needs_re_review")
+        save_order finds the ERP changed inside the transaction
+                      -> rule_check -> erp_check -> human_review (v<n+1>)
         extraction failed            -> END          (status "error")
 
 The graph is compiled with ``MemorySaver`` so a run paused at ``human_review``
-can be resumed later by ``thread_id`` with ``Command(resume={"approve": ...})``.
+can be resumed later by ``thread_id`` with ``Command(resume={...})``.
 
-Approval re-check: ``erp_check`` stores a snapshot of the ERP values the
-proposal was built on. ``human_review`` shows "then vs now", and approval only
-counts if the approver saw the current drift (``seen_drift_hash``) and nothing
-is blocking. ``save_order`` re-checks once more right before writing.
+Proposal versions: ``erp_check`` takes a snapshot (every value with source
+and read time, a version number and a hash). ``human_review`` shows "at
+proposal vs now". An approval must name the version and hash it is for;
+``save_order`` re-reads price, customer and stock inside the save
+transaction and, if anything differs, marks the version stale, re-runs the
+checks and creates the next version for the approver. Only deterministic
+code writes to the database.
 """
 
 from __future__ import annotations
@@ -39,20 +45,30 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, interrupt
 
+from app import audit
 from app.config import get_settings
 from app.extract import extract_document, load_document
 from app.llm import get_llm, model_name_for
-from app.recheck import NO_DRIFT_HASH, compare_with_current, take_snapshot
+from app.recheck import compare_with_current, take_snapshot
 from app.schemas import (
     AgentVerdict,
     ErpSnapshot,
     Issue,
     ProcessResult,
     ProcessStatus,
+    ProposalInfo,
     PurchaseDocument,
     RecheckResult,
 )
-from app.tools import AGENT_TOOLS, check_stock, create_order, find_customer, get_product_price
+from app.snapshot import expires_at, is_expired, values_as_dict
+from app.tools import (
+    AGENT_TOOLS,
+    StaleProposalError,
+    check_stock,
+    create_order,
+    find_customer,
+    get_product_price,
+)
 from app.validate import run_all_checks
 
 logger = logging.getLogger(__name__)
@@ -66,6 +82,8 @@ CHECKPOINT_SERDE = JsonPlusSerializer(
     allowed_msgpack_modules=[("app.schemas", "PurchaseDocument"), ("app.schemas", "Issue")]
 )
 PRICE_TOLERANCE_RATIO = 0.005  # 0.5 %: absorbs rounding of printed prices
+
+ReviewAction = Literal["approve", "reject", "refresh"]
 
 
 class GraphState(TypedDict, total=False):
@@ -85,9 +103,12 @@ class GraphState(TypedDict, total=False):
     approved: bool | None
     order_id: int | None
     status: ProcessStatus | None
-    erp_snapshot: dict[str, Any] | None  # ErpSnapshot taken by erp_check (plain dict)
+    erp_snapshot: dict[str, Any] | None  # ErpSnapshot of the current proposal (plain dict)
+    proposal_version: int  # 0 before erp_check ran, then 1, 2, ...
+    stale_reason: str | None  # why the previous version was marked stale
+    refresh_pending: bool  # True when the next node run must produce a new proposal version
     recheck: dict[str, Any] | None  # last RecheckResult (plain dict)
-    approved_drift_hash: str | None  # drift the approver saw and accepted
+    approver: str | None  # who approved the current version
     log: Annotated[list[str], operator.add]
 
 
@@ -114,6 +135,27 @@ def erp_lookups(doc: PurchaseDocument) -> tuple[int | None, list[Issue]]:
                 message=f"Customer '{doc.customer_name}' not found in ERP (closest: {closest}).",
             )
         )
+    else:
+        status = str(customer.get("status") or "active").lower()
+        if status != "active":
+            issues.append(
+                Issue(
+                    code="customer_blocked",
+                    message=f"Customer '{customer['name']}' has status '{status}' in the ERP.",
+                )
+            )
+        limit = customer.get("credit_limit")
+        if limit is not None and doc.computed_total > float(limit):
+            issues.append(
+                Issue(
+                    code="credit_limit_exceeded",
+                    message=(
+                        f"Order total {doc.computed_total:.2f} exceeds the credit limit "
+                        f"{float(limit):.2f} of '{customer['name']}'."
+                    ),
+                    severity="warning",
+                )
+            )
 
     for idx, line in enumerate(doc.lines, start=1):
         if line.sku is None:
@@ -255,26 +297,70 @@ def merge_issues(*groups: list[Issue]) -> list[Issue]:
     return merged
 
 
-def _seen_drift_hash(decision: Any) -> str:
-    """The drift fingerprint the approver claims to have seen (none = "no drift")."""
-    if isinstance(decision, dict) and decision.get("seen_drift_hash"):
-        return str(decision["seen_drift_hash"])
-    return NO_DRIFT_HASH
-
-
 def _thread_id(config: RunnableConfig | None) -> str:
     return str(((config or {}).get("configurable") or {}).get("thread_id", "?"))
 
 
-def _coerce_decision(decision: Any) -> bool:
-    """Accept ``True``, ``{"approve": true}`` or ``"y"`` / ``"yes"``."""
-    if isinstance(decision, bool):
-        return decision
+def _decision(decision: Any) -> dict[str, Any]:
+    """Normalise a resume value to ``{action, proposal_version, proposal_hash, actor}``.
+
+    Accepts the structured form ``{"action": "approve", ...}``, the older
+    ``{"approve": true}`` / ``True`` / ``"yes"`` forms (treated as approve
+    without a version, which is refused), and ``{"action": "refresh"}``.
+    """
     if isinstance(decision, dict):
-        return bool(decision.get("approve", False))
+        action = decision.get("action")
+        if action not in ("approve", "reject", "refresh"):
+            action = "approve" if decision.get("approve") else "reject"
+        return {
+            "action": action,
+            "proposal_version": decision.get("proposal_version"),
+            "proposal_hash": decision.get("proposal_hash"),
+            "actor": decision.get("actor") or decision.get("approver"),
+        }
     if isinstance(decision, str):
-        return decision.strip().lower() in {"y", "yes", "approve", "true", "1"}
-    return False
+        approve = decision.strip().lower() in {"y", "yes", "approve", "true", "1"}
+    else:
+        approve = bool(decision)
+    return {
+        "action": "approve" if approve else "reject",
+        "proposal_version": None,
+        "proposal_hash": None,
+        "actor": None,
+    }
+
+
+def _stale(
+    state: GraphState,
+    thread_id: str,
+    snapshot: ErpSnapshot,
+    reason: str,
+    *,
+    event: str = "stale",
+    actor: str | None = None,
+    current: dict[str, Any] | None = None,
+    recheck: RecheckResult | None = None,
+) -> dict[str, Any]:
+    """Mark the current proposal version stale and send the run back to the checks."""
+    audit.record(
+        event,
+        thread_id=thread_id,
+        proposal_version=snapshot.version,
+        proposal_hash=snapshot.snapshot_hash,
+        actor=actor,
+        reason=reason,
+        at_proposal=values_as_dict(snapshot.values),
+        current=current,
+    )
+    logger.info("review thread=%s v%s marked %s: %s", thread_id, snapshot.version, event, reason)
+    return {
+        "approved": False,
+        "status": "needs_re_review",
+        "stale_reason": reason,
+        "refresh_pending": True,
+        "recheck": recheck.model_dump() if recheck is not None else state.get("recheck"),
+        "log": [f"human_review: v{snapshot.version} {event} ({reason})"],
+    }
 
 
 # --------------------------------------------------------------------------
@@ -345,8 +431,13 @@ def build_graph(
         issues = run_all_checks(doc)
         return {"issues": issues, "log": [f"rule_check: {len(issues)} issue(s)"]}
 
-    def erp_check_node(state: GraphState) -> dict[str, Any]:
-        """ERP lookups + the LLM tool-calling agent; results are merged."""
+    def erp_check_node(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
+        """ERP lookups + the LLM tool-calling agent; results are merged.
+
+        Ends by taking the proposal snapshot: version ``n+1`` of this thread,
+        every value with source and read time, and the proposal hash. A
+        version above 1 (a refreshed proposal) always goes to a human.
+        """
         doc = state.get("document")
         if doc is None:
             return {"log": ["erp_check: skipped"]}
@@ -370,15 +461,32 @@ def build_graph(
                 ],
             )
             note = "erp_check: agent failed, lookups only"
-        needs_human = bool(issues)
-        snapshot = take_snapshot(doc)
+        version = int(state.get("proposal_version") or 0) + 1
+        snapshot = take_snapshot(doc, version=version)
+        needs_human = bool(issues) or version > 1
+        audit.record(
+            "proposed",
+            thread_id=_thread_id(config),
+            proposal_version=version,
+            proposal_hash=snapshot.snapshot_hash,
+            reason=state.get("stale_reason") if version > 1 else None,
+            at_proposal=values_as_dict(snapshot.values),
+        )
         return {
             "customer_id": customer_id,
             "issues": issues,
             "needs_human": needs_human,
-            "status": "needs_review" if needs_human else None,
+            "approved": None,
+            "approver": None,
+            "refresh_pending": False,
+            "status": (
+                None if not needs_human else "needs_re_review" if version > 1 else "needs_review"
+            ),
             "erp_snapshot": snapshot.model_dump(),
-            "log": [f"{note}; snapshot at {snapshot.snapshot_at}"],
+            "proposal_version": version,
+            "log": [
+                f"{note}; proposal v{version} {snapshot.snapshot_hash} at {snapshot.snapshot_at}"
+            ],
         }
 
     def route(state: GraphState) -> Literal["save_order", "human_review", "end"]:
@@ -388,107 +496,157 @@ def build_graph(
         return "human_review" if state.get("needs_human") else "save_order"
 
     def human_review_node(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
-        """Pause until a human resumes the thread, then re-check the ERP.
+        """Pause until a human resumes the thread, then validate the decision.
 
-        The interrupt payload carries the document, the issues and a fresh
-        "then vs now" comparison. On resume the comparison runs again: the
-        approval only counts if nothing is blocking and the drift the approver
-        saw (``seen_drift_hash``) is still the drift there is now. Otherwise
-        the run goes back to review with status ``needs_re_review``.
+        The interrupt payload carries the document, the issues, the proposal
+        (version, hash, expiry) and a fresh "at proposal vs now" comparison.
+        On resume:
+
+        * ``reject``  -> status ``rejected``.
+        * ``refresh`` -> the version is marked stale and the run goes back to
+          ``rule_check`` to produce the next version.
+        * ``approve`` -> must name the current version and hash; an expired
+          or changed proposal is marked stale instead (next version); else
+          the run proceeds to ``save_order``, which re-checks inside the
+          transaction.
         """
         doc = state["document"]
         assert doc is not None
         snapshot = ErpSnapshot.model_validate(state["erp_snapshot"])
-        recheck = compare_with_current(doc, snapshot)
-        decision = interrupt(
-            {
-                "question": "Approve this order despite the issues?",
-                "document": doc.model_dump(),
-                "issues": [issue.model_dump() for issue in state.get("issues", [])],
-                **recheck.model_dump(),
-            }
-        )
         thread_id = _thread_id(config)
-        if not _coerce_decision(decision):
-            logger.info(
-                "review thread=%s snapshot_at=%s decision=rejected", thread_id, snapshot.snapshot_at
+        recheck = compare_with_current(doc, snapshot)
+        decision = _decision(
+            interrupt(
+                {
+                    "question": "Approve this order despite the issues?",
+                    "document": doc.model_dump(),
+                    "issues": [issue.model_dump() for issue in state.get("issues", [])],
+                    "proposal": _proposal_info(state, snapshot).model_dump(),
+                    **recheck.model_dump(),
+                }
             )
+        )
+        actor = decision["actor"]
+
+        if decision["action"] == "reject":
+            audit.record(
+                "rejected",
+                thread_id=thread_id,
+                proposal_version=snapshot.version,
+                proposal_hash=snapshot.snapshot_hash,
+                actor=actor,
+            )
+            logger.info("review thread=%s v%s decision=rejected", thread_id, snapshot.version)
             return {"approved": False, "status": "rejected", "log": ["human_review: rejected"]}
 
-        recheck = compare_with_current(doc, snapshot)
-        seen = _seen_drift_hash(decision)
-        if recheck.blocked or recheck.drift_hash != seen:
-            reason = "blocking drift" if recheck.blocked else "drift not seen by approver"
-            logger.info(
-                "review thread=%s snapshot_at=%s decision=needs_re_review (%s) drift=%s",
+        recheck = compare_with_current(doc, snapshot)  # fresh: time passed during the pause
+        current = values_as_dict(recheck.values, "now")
+        if decision["action"] == "refresh":
+            return _stale(
+                state,
                 thread_id,
-                snapshot.snapshot_at,
-                reason,
-                recheck.summary(),
+                snapshot,
+                "refresh requested by approver",
+                event="refreshed",
+                actor=actor,
+                current=current,
+                recheck=recheck,
             )
+
+        # approve
+        if (
+            decision["proposal_version"] != snapshot.version
+            or decision["proposal_hash"] != snapshot.snapshot_hash
+        ):
+            reason = (
+                f"approval named v{decision['proposal_version']} {decision['proposal_hash']}, "
+                f"current is v{snapshot.version} {snapshot.snapshot_hash}"
+            )
+            audit.record(
+                "stale",
+                thread_id=thread_id,
+                proposal_version=snapshot.version,
+                proposal_hash=snapshot.snapshot_hash,
+                actor=actor,
+                reason=reason,
+                at_proposal=values_as_dict(snapshot.values),
+                current=current,
+            )
+            logger.info("review thread=%s refused: %s", thread_id, reason)
+            # Not a new version: the approver simply has to look at the current one.
             return {
                 "approved": False,
                 "status": "needs_re_review",
+                "refresh_pending": False,
                 "recheck": recheck.model_dump(),
-                "log": [f"human_review: approval refused, {reason} ({recheck.summary()})"],
+                "log": [f"human_review: approval refused, {reason}"],
             }
+        if recheck.expired:
+            return _stale(
+                state,
+                thread_id,
+                snapshot,
+                f"proposal expired at {recheck.expires_at}",
+                event="expired",
+                actor=actor,
+                current=current,
+                recheck=recheck,
+            )
+        if recheck.stale or recheck.blocked:
+            return _stale(
+                state,
+                thread_id,
+                snapshot,
+                f"ERP changed since proposal: {recheck.summary()}",
+                actor=actor,
+                current=current,
+                recheck=recheck,
+            )
+        audit.record(
+            "approved",
+            thread_id=thread_id,
+            proposal_version=snapshot.version,
+            proposal_hash=snapshot.snapshot_hash,
+            actor=actor,
+            at_proposal=values_as_dict(snapshot.values),
+            current=current,
+        )
         logger.info(
-            "review thread=%s snapshot_at=%s decision=approved drift=%s",
-            thread_id,
-            snapshot.snapshot_at,
-            recheck.summary(),
+            "review thread=%s v%s decision=approved by %s", thread_id, snapshot.version, actor
         )
         return {
             "approved": True,
+            "approver": actor,
             "status": None,
             "recheck": recheck.model_dump(),
-            "approved_drift_hash": recheck.drift_hash,
-            "log": [f"human_review: approved ({recheck.summary()})"],
+            "log": [f"human_review: v{snapshot.version} approved by {actor or 'anonymous'}"],
         }
 
-    def after_review(state: GraphState) -> Literal["save_order", "human_review", "end"]:
-        """Approved orders are saved; refused approvals wait for a new look."""
+    def after_review(
+        state: GraphState,
+    ) -> Literal["save_order", "human_review", "rule_check", "end"]:
+        """Approved orders are saved; stale versions are re-checked; refusals wait."""
         if state.get("approved"):
             return "save_order"
-        return "human_review" if state.get("status") == "needs_re_review" else "end"
+        if state.get("status") != "needs_re_review":
+            return "end"
+        # A stale/expired/refreshed version gets a new one; a wrong version/hash
+        # in the request just re-shows the current proposal.
+        return "rule_check" if state.get("refresh_pending") else "human_review"
 
     def save_order_node(state: GraphState, config: RunnableConfig) -> dict[str, Any]:
-        """Re-check the ERP one last time, then write through ``create_order``.
+        """Write through ``create_order``, which re-checks inside the transaction.
 
-        The re-check refuses to save when the ERP drifted since the approver
-        looked (or, on the no-issue path, since ``erp_check`` ran). The stock
-        check inside ``create_order``'s transaction stays the final guard.
+        ``create_order`` locks the customer and product rows, compares price
+        and customer data with the proposal snapshot and checks stock. If
+        anything differs it raises ``StaleProposalError`` and nothing is
+        written: the version is marked stale and the run goes back to the
+        checks for the next version. The save is idempotent per
+        ``(thread_id, proposal_version)``.
         """
         doc = state["document"]
         customer_id = state.get("customer_id")
-        if doc is not None and state.get("erp_snapshot"):
-            recheck = compare_with_current(doc, ErpSnapshot.model_validate(state["erp_snapshot"]))
-            expected = state.get("approved_drift_hash") or NO_DRIFT_HASH
-            logger.info(
-                "save thread=%s snapshot_at=%s drift=%s blocked=%s",
-                _thread_id(config),
-                recheck.snapshot_at,
-                recheck.summary(),
-                recheck.blocked,
-            )
-            if recheck.blocked or recheck.drift_hash != expected:
-                return {
-                    "status": "error",
-                    "recheck": recheck.model_dump(),
-                    "issues": merge_issues(
-                        state.get("issues", []),
-                        [
-                            Issue(
-                                code="stale_proposal",
-                                message=(
-                                    "Not saved: the ERP changed after approval "
-                                    f"({recheck.summary()})."
-                                ),
-                            )
-                        ],
-                    ),
-                    "log": [f"save_order: refused, stale proposal ({recheck.summary()})"],
-                }
+        thread_id = _thread_id(config)
         if doc is None or customer_id is None:
             return {
                 "status": "error",
@@ -503,6 +661,9 @@ def build_graph(
                 ),
                 "log": ["save_order: skipped (no customer id)"],
             }
+        snapshot = (
+            ErpSnapshot.model_validate(state["erp_snapshot"]) if state.get("erp_snapshot") else None
+        )
         lines = [
             {"sku": line.sku, "quantity": line.quantity, "unit_price": line.unit_price}
             for line in doc.lines
@@ -510,8 +671,31 @@ def build_graph(
         ]
         try:
             order_id = create_order.invoke(
-                {"customer_id": customer_id, "lines": lines, "document_number": doc.document_number}
+                {
+                    "customer_id": customer_id,
+                    "lines": lines,
+                    "document_number": doc.document_number,
+                    "snapshot": snapshot.model_dump() if snapshot else None,
+                    "thread_id": thread_id,
+                    "proposal_version": snapshot.version if snapshot else None,
+                    "approved_by": state.get("approver"),
+                }
             )
+        except StaleProposalError as exc:
+            assert snapshot is not None
+            reason = f"ERP changed before save: {'; '.join(d.message for d in exc.drift)}"
+            recheck = compare_with_current(doc, snapshot)
+            result = _stale(
+                state,
+                thread_id,
+                snapshot,
+                reason,
+                actor=state.get("approver"),
+                current=values_as_dict(exc.current.values),
+                recheck=recheck,
+            )
+            result["log"] = [f"save_order: refused, {reason}"]
+            return result
         except Exception as exc:
             return {
                 "status": "error",
@@ -521,11 +705,25 @@ def build_graph(
                 ),
                 "log": [f"save_order: failed ({exc})"],
             }
+        if snapshot is not None:
+            audit.record(
+                "saved",
+                thread_id=thread_id,
+                proposal_version=snapshot.version,
+                proposal_hash=snapshot.snapshot_hash,
+                actor=state.get("approver"),
+                order_id=order_id,
+                at_proposal=values_as_dict(snapshot.values),
+            )
         return {
             "order_id": order_id,
             "status": "saved",
             "log": [f"save_order: created order {order_id}"],
         }
+
+    def after_save(state: GraphState) -> Literal["rule_check", "end"]:
+        """A stale save goes back to the checks for the next proposal version."""
+        return "rule_check" if state.get("status") == "needs_re_review" else "end"
 
     workflow = StateGraph(GraphState)
     workflow.add_node("load_document", load_document_node)
@@ -545,9 +743,16 @@ def build_graph(
     workflow.add_conditional_edges(
         "human_review",
         after_review,
-        {"save_order": "save_order", "human_review": "human_review", "end": END},
+        {
+            "save_order": "save_order",
+            "human_review": "human_review",
+            "rule_check": "rule_check",
+            "end": END,
+        },
     )
-    workflow.add_edge("save_order", END)
+    workflow.add_conditional_edges(
+        "save_order", after_save, {"rule_check": "rule_check", "end": END}
+    )
     return workflow.compile(checkpointer=checkpointer or MemorySaver(serde=CHECKPOINT_SERDE))
 
 
@@ -577,10 +782,23 @@ def pending_interrupt(state: dict[str, Any]) -> dict[str, Any] | None:
 
 def recheck_from(mapping: dict[str, Any] | None) -> RecheckResult | None:
     """Rebuild a :class:`RecheckResult` from state or an interrupt payload."""
-    if not mapping or "drift_hash" not in mapping:
+    if not mapping or "proposal_hash" not in mapping:
         return None
     return RecheckResult.model_validate(
         {key: mapping[key] for key in RecheckResult.model_fields if key in mapping}
+    )
+
+
+def _proposal_info(state: dict[str, Any], snapshot: ErpSnapshot) -> ProposalInfo:
+    ttl = get_settings().proposal_ttl_hours
+    return ProposalInfo(
+        version=snapshot.version,
+        hash=snapshot.snapshot_hash,
+        created_at=snapshot.snapshot_at,
+        expires_at=expires_at(snapshot.snapshot_at, ttl),
+        expired=is_expired(snapshot.snapshot_at, ttl),
+        stale_reason=state.get("stale_reason") if snapshot.version > 1 else None,
+        approved_by=state.get("approver"),
     )
 
 
@@ -592,6 +810,9 @@ def to_process_result(state: dict[str, Any], thread_id: str) -> ProcessResult:
     """
     payload = pending_interrupt(state)
     status: ProcessStatus = state.get("status") or ("needs_review" if payload else "error")
+    snapshot = (
+        ErpSnapshot.model_validate(state["erp_snapshot"]) if state.get("erp_snapshot") else None
+    )
     return ProcessResult(
         status=status,
         order_id=state.get("order_id"),
@@ -599,6 +820,7 @@ def to_process_result(state: dict[str, Any], thread_id: str) -> ProcessResult:
         document=state.get("document"),
         issues=list(state.get("issues") or []),
         log=list(state.get("log") or []),
+        proposal=_proposal_info(state, snapshot) if snapshot else None,
         recheck=recheck_from(payload) or recheck_from(state.get("recheck")),
     )
 
@@ -632,8 +854,11 @@ def run_document(
         "order_id": None,
         "status": None,
         "erp_snapshot": None,
+        "proposal_version": 0,
+        "stale_reason": None,
+        "refresh_pending": False,
         "recheck": None,
-        "approved_drift_hash": None,
+        "approver": None,
         "log": [],
     }
     state = graph.invoke(initial, config=_config(thread_id, provider, callbacks))
@@ -643,26 +868,41 @@ def run_document(
 def resume_document(
     graph: CompiledStateGraph,
     thread_id: str,
-    approve: bool,
-    seen_drift_hash: str | None = None,
+    approve: bool | None = None,
+    *,
+    action: ReviewAction | None = None,
+    proposal_version: int | None = None,
+    proposal_hash: str | None = None,
+    actor: str | None = None,
 ) -> tuple[ProcessResult, dict[str, Any]]:
     """Resume a run paused at ``human_review`` with the human's decision.
 
-    ``seen_drift_hash`` is the ``recheck.drift_hash`` the approver looked at.
-    Leaving it out means "I saw no drift": if there is drift now, the approval
-    is refused and the result has status ``needs_re_review``.
+    ``action`` is ``approve``, ``reject`` or ``refresh`` (``approve=True/False``
+    is accepted as a shorthand). An approval must carry the ``proposal_version``
+    and ``proposal_hash`` the approver looked at; otherwise, or when the ERP
+    changed or the proposal expired, nothing is saved and the result has
+    status ``needs_re_review`` with the next proposal version.
     """
+    if action is None:
+        action = "approve" if approve else "reject"
     checkpoint = graph.get_state({"configurable": {"thread_id": thread_id}})
     provider = checkpoint.values.get("provider") if checkpoint.values else None
     state = graph.invoke(
-        Command(resume={"approve": approve, "seen_drift_hash": seen_drift_hash}),
+        Command(
+            resume={
+                "action": action,
+                "proposal_version": proposal_version,
+                "proposal_hash": proposal_hash,
+                "actor": actor,
+            }
+        ),
         config=_config(thread_id, provider),
     )
     return to_process_result(state, thread_id), state
 
 
 def review_view(graph: CompiledStateGraph, thread_id: str) -> ProcessResult | None:
-    """Fresh "then vs now" view of a paused run, or ``None`` for an unknown thread.
+    """Fresh "at proposal vs now" view of a paused run, or ``None`` for an unknown thread.
 
     Used by ``GET /documents/{thread_id}``: the ERP is re-read now, so an
     approver who opens the queue an hour later sees today's values.
@@ -677,3 +917,11 @@ def review_view(graph: CompiledStateGraph, thread_id: str) -> ProcessResult | No
         state["recheck"] = fresh.model_dump()
         state["status"] = state.get("status") or "needs_review"
     return to_process_result(state, thread_id)
+
+
+def is_waiting(graph: CompiledStateGraph, thread_id: str) -> bool | None:
+    """``True`` if the thread is paused for review, ``False`` if finished, ``None`` if unknown."""
+    checkpoint = graph.get_state({"configurable": {"thread_id": thread_id}})
+    if not checkpoint.values:
+        return None
+    return bool(checkpoint.next)

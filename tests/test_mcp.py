@@ -16,7 +16,8 @@ def test_server_registers_the_three_read_only_tools() -> None:
 
 def test_tool_functions_return_expected_shapes() -> None:
     customer = mcp_server.erp_find_customer("Shree Ganesh Jewels")
-    assert customer == {"found": True, "id": 1, "name": "Shree Ganesh Jewels", "city": "Surat"}
+    assert customer["found"] and customer["id"] == 1 and customer["name"] == "Shree Ganesh Jewels"
+    assert customer["city"] == "Surat" and customer["credit_limit"] == 15000.0
     assert mcp_server.erp_find_customer("Golden Palm Trading LLC")["found"] is False
 
     stock = mcp_server.erp_check_stock("JWL-006", 5)
@@ -24,5 +25,11 @@ def test_tool_functions_return_expected_shapes() -> None:
     assert mcp_server.erp_check_stock("JWL-006", 50)["enough"] is False
 
     price = mcp_server.erp_get_product_price("snk-004")
-    assert price == {"found": True, "sku": "SNK-004", "name": "Mukhwas Mix 100g", "unit_price": 1.8}
+    assert price == {
+        "found": True,
+        "sku": "SNK-004",
+        "name": "Mukhwas Mix 100g",
+        "unit_price": 1.8,
+        "row_version": 1,
+    }
     assert mcp_server.erp_get_product_price("ZZZ-000") == {"found": False, "sku": "ZZZ-000"}

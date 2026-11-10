@@ -65,14 +65,54 @@ def test_upload_then_review_flow(client_factory, wrong_total_doc: PurchaseDocume
         assert body["issues"][0]["code"] == "document_total_mismatch"
         thread_id = body["thread_id"]
 
-        resumed = client.post(f"/documents/{thread_id}/review", json={"approve": True})
+        proposal = body["proposal"]
+        assert proposal["version"] == 1 and len(proposal["hash"]) == 16
+
+        # approve=true without the version/hash is refused.
+        assert (
+            client.post(f"/documents/{thread_id}/review", json={"approve": True}).status_code == 422
+        )
+
+        decision = {
+            "approve": True,
+            "proposal_version": proposal["version"],
+            "proposal_hash": proposal["hash"],
+            "approver": "alice",
+        }
+        resumed = client.post(f"/documents/{thread_id}/review", json=decision)
         assert resumed.status_code == 200, resumed.text
         assert resumed.json()["status"] == "saved"
+        order_id = resumed.json()["order_id"]
 
+        # Double click / retry: same answer, still one order.
+        again = client.post(f"/documents/{thread_id}/review", json=decision)
+        assert again.status_code == 200 and again.json()["order_id"] == order_id
+        orders = client.get("/orders").json()
+        assert len(orders) == 1
         assert (
-            client.post(f"/documents/{thread_id}/review", json={"approve": True}).status_code == 409
+            orders[0]["thread_id"],
+            orders[0]["proposal_version"],
+            orders[0]["approved_by"],
+        ) == (
+            thread_id,
+            1,
+            "alice",
         )
-        assert client.post("/documents/nope/review", json={"approve": True}).status_code == 404
+        # A different decision on a finished run is a conflict.
+        other = {**decision, "proposal_hash": "0000000000000000"}
+        assert client.post(f"/documents/{thread_id}/review", json=other).status_code == 409
+        assert client.post(f"/documents/{thread_id}/refresh").status_code == 409
+        assert client.post("/documents/nope/review", json=decision).status_code == 404
+
+        audit = client.get(f"/documents/{thread_id}/audit").json()
+        assert [(e["proposal_version"], e["event"]) for e in audit] == [
+            (1, "proposed"),
+            (1, "approved"),
+            (1, "saved"),
+            (1, "replayed"),
+        ]
+        assert audit[1]["actor"] == "alice" and audit[2]["order_id"] == order_id
+        assert client.get("/documents/nope/audit").status_code == 404
 
 
 def test_reject_via_api(client_factory, wrong_total_doc: PurchaseDocument) -> None:
@@ -114,7 +154,7 @@ def test_web_ui_and_samples_are_served(client_factory, clean_doc: PurchaseDocume
         assert client.get("/samples/nope.txt").status_code == 404
 
 
-def test_review_shows_then_vs_now_and_refuses_unseen_drift(
+def test_review_shows_at_proposal_vs_now_and_requires_refresh(
     client_factory, wrong_total_doc: PurchaseDocument
 ) -> None:
     from sqlalchemy import select
@@ -124,34 +164,94 @@ def test_review_shows_then_vs_now_and_refuses_unseen_drift(
     with client_factory(FakeERPModel(extracted=wrong_total_doc)) as client:
         body = client.post("/documents", json={"text": "x"}).json()
         thread_id = body["thread_id"]
-        assert body["status"] == "needs_review" and body["recheck"]["drift"] == []
-        assert body["recheck"]["snapshot"]["lines"][0] == {
+        assert body["status"] == "needs_review" and not body["recheck"]["stale"]
+        values = {v["key"]: v for v in body["recheck"]["values"]}
+        assert values["price:JWL-001"] == {
+            "key": "price:JWL-001",
+            "label": "Catalogue price",
             "sku": "JWL-001",
-            "found": True,
-            "unit_price_catalogue": 24.5,
-            "stock": 40,
+            "at_proposal": 24.5,
+            "now": 24.5,
+            "source": "products.unit_price",
+            "read_at": body["proposal"]["created_at"],
+            "changed": False,
+            "decision_relevant": True,
         }
+        assert values["customer.credit_limit"]["source"] == "customers.credit_limit"
 
         with get_session() as session:  # price changes while the order waits
             session.scalar(select(Product).where(Product.sku == "JWL-001")).unit_price = 30.0
 
         view = client.get(f"/documents/{thread_id}").json()
-        assert view["status"] == "needs_review"
-        drift = view["recheck"]["drift"]
-        assert len(drift) == 1 and drift[0]["field"] == "price" and drift[0]["value_now"] == 30.0
-        assert view["recheck"]["current"]["lines"][0]["unit_price_catalogue"] == 30.0
+        assert view["status"] == "needs_review" and view["recheck"]["stale"]
+        row = next(v for v in view["recheck"]["values"] if v["key"] == "price:JWL-001")
+        assert (row["at_proposal"], row["now"], row["changed"]) == (24.5, 30.0, True)
+        assert view["proposal"]["version"] == 1 and not view["proposal"]["expired"]
 
-        # Approving without the hash = "I saw no drift": refused, nothing saved.
-        refused = client.post(f"/documents/{thread_id}/review", json={"approve": True}).json()
+        # Approving v1 anyway: nothing saved, v2 is created for the approver.
+        decision = {
+            "approve": True,
+            "proposal_version": 1,
+            "proposal_hash": view["proposal"]["hash"],
+            "approver": "alice",
+        }
+        refused = client.post(f"/documents/{thread_id}/review", json=decision).json()
         assert refused["status"] == "needs_re_review" and refused["order_id"] is None
-        assert len(refused["recheck"]["drift"]) == 1
+        assert (
+            refused["proposal"]["version"] == 2
+            and "ERP changed" in refused["proposal"]["stale_reason"]
+        )
         assert client.get("/orders").json() == []
 
-        # Approving against the version actually seen: saved.
-        seen = refused["recheck"]["drift_hash"]
+        # The approver refreshes once more (nothing changed, v3) and approves v3.
+        refreshed = client.post(f"/documents/{thread_id}/refresh", json={"actor": "alice"}).json()
+        assert refreshed["status"] == "needs_re_review" and refreshed["proposal"]["version"] == 3
         saved = client.post(
-            f"/documents/{thread_id}/review", json={"approve": True, "seen_drift_hash": seen}
+            f"/documents/{thread_id}/review",
+            json={
+                **decision,
+                "proposal_version": 3,
+                "proposal_hash": refreshed["proposal"]["hash"],
+            },
         ).json()
         assert saved["status"] == "saved" and saved["order_id"] is not None
         assert client.get(f"/documents/{thread_id}").json()["status"] == "saved"
         assert client.get("/documents/nope").status_code == 404
+        events = [
+            (e["proposal_version"], e["event"])
+            for e in client.get(f"/documents/{thread_id}/audit").json()
+        ]
+        assert events == [
+            (1, "proposed"),
+            (1, "stale"),
+            (2, "proposed"),
+            (2, "refreshed"),
+            (3, "proposed"),
+            (3, "approved"),
+            (3, "saved"),
+        ]
+
+
+def test_concurrent_double_approve_creates_one_order(
+    client_factory, wrong_total_doc: PurchaseDocument
+) -> None:
+    """Two approve requests at the same time: the per-thread lock serialises them."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with client_factory(FakeERPModel(extracted=wrong_total_doc)) as client:
+        body = client.post("/documents", json={"text": "x"}).json()
+        thread_id, proposal = body["thread_id"], body["proposal"]
+        decision = {
+            "approve": True,
+            "proposal_version": proposal["version"],
+            "proposal_hash": proposal["hash"],
+        }
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(
+                pool.map(
+                    lambda _: client.post(f"/documents/{thread_id}/review", json=decision), range(2)
+                )
+            )
+        assert [r.status_code for r in responses] == [200, 200]
+        assert len({r.json()["order_id"] for r in responses}) == 1
+        assert len(client.get("/orders").json()) == 1

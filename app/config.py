@@ -54,6 +54,10 @@ class Settings(BaseSettings):
         default=0.005,
         description="Relative catalogue-price change (0.005 = 0.5 %) that counts as drift.",
     )
+    proposal_ttl_hours: float = Field(
+        default=24.0,
+        description="A proposal older than this must be refreshed before it can be approved.",
+    )
 
     log_level: str = "INFO"
 

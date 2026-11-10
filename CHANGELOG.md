@@ -2,6 +2,27 @@
 
 All notable changes to ERP-Agent. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.0] - 2026-11-10
+
+### Added
+
+- **Approval tied to a proposal version** (closes the stale-approval gap for price and customer data; stock was already re-checked in the save transaction).
+  - `app/snapshot.py`: the proposal snapshot now records every decision-relevant value (catalogue price per line, customer status, address, credit limit, payment terms) with its source (`products.unit_price`, `customers.credit_limit`, ...) and the UTC time it was read, plus a version number and a hash of those values.
+  - `GET /documents/{thread_id}` returns `proposal` (version, hash, created/expires) and `recheck.values`: per value `at_proposal`, `now`, `source`, `changed`; plus `stale`, `blocked`, `expired`.
+  - Web UI: value table with a source column and highlighted changed rows; when anything decision-relevant changed, the proposal expired or a change blocks, a warning and **Refresh proposal** replace **Approve**. Approver name field (stored in the audit log).
+  - `POST /documents/{thread_id}/review` requires `proposal_version` and `proposal_hash` for approvals. `create_order` locks the customer and product rows, re-reads price and customer data inside the save transaction, compares with the snapshot and keeps the stock check; on any difference it raises `StaleProposalError`, nothing is written, the version is marked stale, the rule check and the ERP check run again and the next version is created for the approver.
+  - Idempotent approve: per-thread lock in the API, unique constraint `orders(thread_id, proposal_version)`, replay of the saved result on a repeated request.
+  - `POST /documents/{thread_id}/refresh` creates the next version on request. Proposals older than `PROPOSAL_TTL_HOURS` (default 24) must be refreshed before approval.
+  - Audit log (`audit_log` table, `GET /documents/{thread_id}/audit`): `proposed`, `approved`, `saved`, `stale`, `expired`, `refreshed`, `rejected`, `replayed`, with actor, reason, order id, and the values at proposal time and at decision time.
+  - Customer master data: `address`, `status`, `credit_limit`, `payment_terms`, `row_version` (also `row_version` on products). `erp_check` flags `customer_blocked` and `credit_limit_exceeded`.
+  - Tests: price change → stale + v2; credit limit change → same; nothing changes → saved exactly once; double approve (sequential and concurrent) → one order; expired → must refresh; stock drop → still blocked; change between pre-check and transaction → caught in the transaction.
+
+### Changed
+
+- `seen_drift_hash` is gone; approvals name `proposal_version` + `proposal_hash`. `resume_document` takes `action="approve" | "reject" | "refresh"`.
+- The database schema changed (new customer columns, `orders.thread_id`/`proposal_version`/`approved_by`, `audit_log`): run `python -m app.seed` to recreate `data/erp.db`.
+- Version bumped to 1.2.0.
+
 ## [1.1.0] - 2026-11-10
 
 ### Added

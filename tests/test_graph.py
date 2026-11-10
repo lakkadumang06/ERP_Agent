@@ -32,7 +32,21 @@ def test_erp_lookups_flag_insufficient_stock_and_price(clean_doc: PurchaseDocume
     doc.lines[0].quantity = 999  # JWL-001 has 40 in stock
     doc.lines[1].unit_price = 99.0  # list price 12.50
     _, issues = erp_lookups(doc)
-    assert {i.code for i in issues} == {"insufficient_stock", "price_mismatch"}
+    # 999 x 24.50 also exceeds the customer's 15 000 EUR credit limit.
+    assert {i.code for i in issues} == {
+        "insufficient_stock",
+        "price_mismatch",
+        "credit_limit_exceeded",
+    }
+
+
+def test_erp_lookups_flag_blocked_customer(clean_doc: PurchaseDocument) -> None:
+    from app.db import Customer, get_session
+
+    with get_session() as session:
+        session.get(Customer, 1).status = "blocked"
+    _, issues = erp_lookups(clean_doc)
+    assert [i.code for i in issues] == ["customer_blocked"]
 
 
 def test_clean_document_ends_saved(clean_doc: PurchaseDocument) -> None:
@@ -59,9 +73,19 @@ def test_error_document_ends_in_interrupt(wrong_total_doc: PurchaseDocument) -> 
     assert [i["code"] for i in payload["issues"]] == ["document_total_mismatch"]
 
 
+def _approve(graph, thread_id, result):
+    return resume_document(
+        graph,
+        thread_id,
+        action="approve",
+        proposal_version=result.proposal.version,
+        proposal_hash=result.proposal.hash,
+    )
+
+
 def test_approve_resumes_and_saves(wrong_total_doc: PurchaseDocument) -> None:
-    _, _, graph, thread_id = _run(FakeERPModel(extracted=wrong_total_doc))
-    result, state = resume_document(graph, thread_id, approve=True)
+    first, _, graph, thread_id = _run(FakeERPModel(extracted=wrong_total_doc))
+    result, state = _approve(graph, thread_id, first)
     assert result.status == "saved" and result.order_id is not None
     assert state["approved"] is True
 
@@ -74,8 +98,8 @@ def test_reject_ends_rejected_without_saving(wrong_total_doc: PurchaseDocument) 
 
 
 def test_unknown_sku_cannot_be_saved_even_if_approved(unknown_sku_doc: PurchaseDocument) -> None:
-    _, _, graph, thread_id = _run(FakeERPModel(extracted=unknown_sku_doc))
-    result, _ = resume_document(graph, thread_id, approve=True)
+    first, _, graph, thread_id = _run(FakeERPModel(extracted=unknown_sku_doc))
+    result, _ = _approve(graph, thread_id, first)
     # create_order is atomic: an unknown SKU raises, nothing is written.
     assert result.status == "error"
     assert result.issues[-1].code == "save_failed" and "JWL-999" in result.issues[-1].message

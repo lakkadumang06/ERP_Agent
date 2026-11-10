@@ -15,10 +15,12 @@ flowchart TD
     D -->|route: no issues| F[save_order<br/>create_order → stock reduced]
     D -->|route: issues| E[human_review<br/>interrupt payload: document + issues]
     D -->|route: extraction failed| X([END · status = error])
-    E -->|Command resume approve=true,<br/>ERP unchanged since the approver's view| F
-    E -->|Command resume approve=false| Y([END · status = rejected])
-    E -->|approve, but ERP drifted or blocks| E
-    F --> Z([END · status = saved])
+    E -->|Command resume approve v<sub>n</sub>| F
+    E -->|Command resume reject| Y([END · status = rejected])
+    E -->|refresh, expired or ERP changed → proposal v<sub>n+1</sub>| C
+    E -->|approval names an old version| E
+    F -->|saved| Z([END · status = saved])
+    F -->|ERP changed inside the save transaction → stale| C
 
     classDef llm fill:#eef3ff,stroke:#4c6ef5;
     classDef human fill:#fff4e6,stroke:#f08c00;
@@ -43,9 +45,11 @@ writes to the database.
 | `needs_human` | `bool` | `erp_check` |
 | `approved` | `bool \| None` | `human_review` |
 | `order_id` | `int \| None` | `save_order` |
-| `erp_snapshot` | `dict` (`ErpSnapshot`) | `erp_check` |
+| `erp_snapshot` | `dict` (`ErpSnapshot`: values with source + time, version, hash) | `erp_check` |
+| `proposal_version` | `int` (0 before `erp_check`, then 1, 2, ...) | `erp_check` |
+| `stale_reason`, `refresh_pending` | `str \| None`, `bool` | `human_review`, `save_order` |
 | `recheck` | `dict` (`RecheckResult`) | `human_review`, `save_order` |
-| `approved_drift_hash` | `str \| None` | `human_review` |
+| `approver` | `str \| None` | `human_review` |
 | `status` | `saved \| needs_review \| needs_re_review \| rejected \| error` | several nodes |
 | `log` | `list[str]` (additive reducer) | every node |
 
@@ -65,24 +69,42 @@ Any issue, including a warning, routes the document to `human_review`. The
 save node calls `create_order`, which is atomic: approval cannot write an
 order with an unknown SKU or insufficient stock.
 
-## Approval re-check (v1.1)
+## Approval tied to a proposal version (v1.2)
 
 Human approval has its own timing gap: a proposal can wait in the queue for an
-hour while prices, stock or the customer record change. `app/recheck.py`
-closes it without any LLM involvement:
+hour while prices, stock or the customer record change. The graph closes it
+without any LLM involvement:
 
-1. `erp_check` calls `take_snapshot(document)` and stores the result in the
-   state (`erp_snapshot`: price and stock per SKU, matched customer, UTC time).
-2. `human_review` calls `compare_with_current(document, snapshot)` before it
-   interrupts, so the payload (and `GET /documents/{thread_id}`) carries
-   `snapshot`, `current`, `drift`, `drift_hash` and `blocked`.
-3. The approver resumes with `{"approve": true, "seen_drift_hash": ...}`. The
-   node compares again. If the drift now hashes differently from what the
-   approver saw, or any item has severity `block`, the node returns status
-   `needs_re_review` and the conditional edge routes back to `human_review`,
-   which interrupts again with the fresh view.
-4. `save_order` compares one last time against the approved hash right before
-   `create_order`; the stock check inside the transaction stays the final guard.
+```text
+Propose (snapshot v1) → Review (at proposal vs now) → Approve v1 → Save re-checks price, customer and stock in one transaction
+```
+
+1. `erp_check` calls `take_snapshot(document, version=n)` (`app/recheck.py`,
+   built on `app/snapshot.py`) and stores it in the state: every value the
+   decision depends on with `source` and `read_at`, a version number and a
+   hash of the decision-relevant values (prices, customer data; stock is
+   informational). An audit row `proposed` is written.
+2. `human_review` calls `compare_with_current()` before it interrupts, so the
+   payload (and `GET /documents/{thread_id}`) carries `proposal` and
+   `recheck.values` (`at_proposal`, `now`, `source`, `changed`) plus `stale`,
+   `blocked` and `expired` (`PROPOSAL_TTL_HOURS`, default 24).
+3. The approver resumes with `{"action": "approve", "proposal_version", "proposal_hash", "actor"}`.
+   An approval for another version is refused and the current one re-shown.
+   An expired or changed proposal is marked stale (audit `expired` / `stale`)
+   and the edge routes back to `rule_check`, so `erp_check` runs again and
+   produces version n+1, which always waits for a human (`needs_re_review`).
+   `{"action": "refresh"}` does the same on request.
+4. `save_order` calls `create_order(..., snapshot, thread_id, proposal_version, approved_by)`.
+   Inside the transaction the customer and product rows are locked
+   (`with_for_update`, effective on PostgreSQL) and re-read, compared with
+   the snapshot, and stock is checked as before. Any difference raises
+   `StaleProposalError`: nothing is written, the version is marked stale and
+   the run goes back to `rule_check` for the next version. The unique
+   constraint `orders(thread_id, proposal_version)` and a per-thread lock in
+   the API make a repeated approve return the existing order.
+5. `audit_log` records `proposed`, `approved`, `saved`, `stale`, `expired`,
+   `refreshed`, `rejected` and `replayed` with actor, reason and the values
+   at proposal time and at decision time.
 
 ## Runtime pieces
 

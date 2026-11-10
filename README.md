@@ -88,10 +88,11 @@ flowchart TD
     D -->|no issues| F[save_order<br/>create_order, stock reduced]
     D -->|issues| E[human_review<br/>LangGraph interrupt]
     D -->|extraction failed| X([END · error])
-    E -->|approve, ERP unchanged| F
-    E -->|approve, but ERP drifted| E
+    E -->|approve v<sub>n</sub>| F
+    E -->|refresh, expired or ERP changed| C
     E -->|reject| Y([END · rejected])
-    F --> Z([END · saved])
+    F -->|saved| Z([END · saved])
+    F -->|ERP changed inside the transaction → stale| C
 ```
 
 Every run is checkpointed by `thread_id` with `MemorySaver`, so a run paused at `human_review` is resumed later with `Command(resume={"approve": true})`, from the CLI or through `POST /documents/{thread_id}/review`. More detail in [docs/architecture.md](docs/architecture.md).
@@ -104,7 +105,7 @@ Every run is checkpointed by `thread_id` with `MemorySaver`, so a run paused at 
 | `PurchaseDocument` extracted with `with_structured_output(method="json_schema")`, one retry on schema error | Structured outputs | `app/extract.py`, `app/schemas.py` |
 | Agent bound to three read-only `@tool`s, hand-written loop with max 8 iterations, structured verdict | Tool calling | `app/tools.py`, `app/graph.py` |
 | `interrupt()` with the document and issues, resume with `Command` | Human-in-the-loop | `app/graph.py` |
-| Snapshot at proposal time, "then vs now" at review time, approval only against the version the human saw | Stale-proposal protection | `app/recheck.py`, `app/graph.py` |
+| Versioned proposal snapshot (value, source, time, hash), "at proposal vs now" at review time, approval tied to the version, re-read inside the save transaction, expiry, audit log | Stale-proposal protection | `app/snapshot.py`, `app/recheck.py`, `app/tools.py`, `app/graph.py` |
 | `MemorySaver` keyed by `thread_id`, one graph instance behind the API | Checkpointing | `app/api.py` |
 | Runs tagged `provider:<name>` with model metadata | LangSmith tracing | `app/graph.py` |
 | Field / line accuracy, issue detection, false alarms, latency, cost per provider | Evals | `evals/run_evals.py` |
@@ -232,7 +233,7 @@ curl -s -X POST http://localhost:8000/documents -H "Content-Type: application/js
 }
 ```
 
-Before deciding, the approver fetches the current view. The ERP is re-read now, and `recheck` shows the values at proposal time, the values now and the drift between them:
+Before deciding, the approver fetches the current view. The ERP is re-read now, and `recheck.values` lists every value the proposal depends on with its source, the value at proposal time and the value now:
 
 ```bash
 curl -s http://localhost:8000/documents/0b7c5a7e-8e1f-4e1d-a3a2-1f6d2b7c9e55
@@ -241,41 +242,65 @@ curl -s http://localhost:8000/documents/0b7c5a7e-8e1f-4e1d-a3a2-1f6d2b7c9e55
 ```json
 {
   "status": "needs_review",
+  "proposal": {"version": 1, "hash": "3f9c1b2a7d4e5f60", "created_at": "2026-11-10T09:02:11+00:00", "expires_at": "2026-11-11T09:02:11+00:00", "expired": false},
   "recheck": {
-    "snapshot_at": "2026-11-10T09:02:11+00:00",
-    "checked_at": "2026-11-10T10:14:38+00:00",
-    "snapshot": {"customer": {"found": true, "id": 7, "name": "Nordlicht Schmuck"}, "lines": [{"sku": "JWL-002", "found": true, "unit_price_catalogue": 18.0, "stock": 60}, {"sku": "JWL-005", "found": true, "unit_price_catalogue": 6.9, "stock": 120}]},
-    "current":  {"customer": {"found": true, "id": 7, "name": "Nordlicht Schmuck"}, "lines": [{"sku": "JWL-002", "found": true, "unit_price_catalogue": 20.0, "stock": 60}, {"sku": "JWL-005", "found": true, "unit_price_catalogue": 6.9, "stock": 120}]},
+    "proposal_version": 1,
+    "proposal_hash": "3f9c1b2a7d4e5f60",
+    "values": [
+      {"key": "customer.credit_limit", "label": "Credit limit", "at_proposal": 10000.0, "now": 10000.0, "source": "customers.credit_limit", "read_at": "2026-11-10T09:02:11+00:00", "changed": false},
+      {"key": "customer.payment_terms", "label": "Payment terms", "at_proposal": "net 30", "now": "net 30", "source": "customers.payment_terms", "read_at": "2026-11-10T09:02:11+00:00", "changed": false},
+      {"key": "price:JWL-002", "label": "Catalogue price", "sku": "JWL-002", "at_proposal": 18.0, "now": 20.0, "source": "products.unit_price", "read_at": "2026-11-10T09:02:11+00:00", "changed": true},
+      {"key": "stock:JWL-002", "label": "Stock", "sku": "JWL-002", "at_proposal": 60, "now": 60, "source": "products.stock", "read_at": "2026-11-10T09:02:11+00:00", "changed": false, "decision_relevant": false}
+    ],
     "drift": [{"field": "price", "sku": "JWL-002", "value_at_proposal": 18.0, "value_now": 20.0, "severity": "warn", "message": "Catalogue price of JWL-002 changed from 18.00 to 20.00."}],
-    "drift_hash": "3f9c1b2a7d4e5f60",
+    "stale": true,
+    "expired": false,
     "blocked": false
   },
   "...": "..."
 }
 ```
 
-Human decision, approving against the version actually seen:
+`stale: true` means a decision-relevant value changed: the UI shows **Refresh proposal** instead of **Approve**. Refreshing re-runs the rule check and the ERP check and creates version 2:
+
+```bash
+curl -s -X POST http://localhost:8000/documents/0b7c5a7e-8e1f-4e1d-a3a2-1f6d2b7c9e55/refresh \
+  -H "Content-Type: application/json" -d '{"actor": "alice"}'
+# → {"status": "needs_re_review", "proposal": {"version": 2, "hash": "9a1e...", ...}, ...}
+```
+
+The approval names the version and hash the approver looked at. The order is saved in one transaction that locks and re-reads the customer and product rows; if anything differs from the snapshot, nothing is written and the response carries the next version instead:
 
 ```bash
 curl -s -X POST http://localhost:8000/documents/0b7c5a7e-8e1f-4e1d-a3a2-1f6d2b7c9e55/review \
-  -H "Content-Type: application/json" -d '{"approve": true, "seen_drift_hash": "3f9c1b2a7d4e5f60"}'
+  -H "Content-Type: application/json" \
+  -d '{"approve": true, "proposal_version": 2, "proposal_hash": "9a1e...", "approver": "alice"}'
 # → {"status": "saved", "order_id": 2, ...}
-# If the ERP changed again in between: {"status": "needs_re_review", "recheck": {...new drift...}}
+# Repeating the same request returns the same order (idempotent).
+# If the ERP changed again in between: {"status": "needs_re_review", "proposal": {"version": 3, ...}}
 ```
 
-Other endpoints: `GET /health`, `GET /providers` (configured LLM providers), `GET /orders` (orders with lines), `GET /products` (catalogue with stock). Interactive docs at `/docs`.
+`GET /documents/{thread_id}/audit` lists who proposed, approved and saved which version, with the values at proposal time and at decision time, and why a version was marked stale.
 
-## Approval re-check: why the approver sees "then vs now"
+Other endpoints: `GET /health`, `GET /providers` (configured LLM providers), `GET /orders` (orders with lines, proposal version and approver), `GET /products` (catalogue with stock). Interactive docs at `/docs`.
 
-Human approval has its own timing gap. An order can wait in the review queue for an hour, and by then a price or a stock level may have changed. The approver would then sign off on data that was only correct when the proposal was drafted. Stock was already safe (`create_order` re-checks it inside the transaction), but price and customer data were not, and the review screen showed a snapshot from extraction time without saying so.
+## Safety: approval against a proposal version
 
-Since v1.1 the graph closes that gap with deterministic code only (no LLM involved):
+Two rules hold everything together. First, **only deterministic code writes to the database**: the LLM is bound to three read-only tools, and the single write happens in `save_order` through `create_order`, after validation and, if needed, approval. Second, **an approval is for one proposal version**, and the values that version was built on are checked again inside the transaction that saves the order.
 
-1. **Snapshot at proposal time.** `erp_check` stores the catalogue price and stock of every SKU, the matched customer and a UTC timestamp in the graph state.
-2. **Fresh view at review time.** `compare_with_current()` in `app/recheck.py` re-reads the ERP through the same read-only tools and lists every difference as a drift item. `block`: stock is now below the quantity, the customer is missing, a SKU vanished. `warn`: the catalogue price moved by more than `RECHECK_PRICE_TOLERANCE` (default 0.5 %), or stock dropped but still covers the order.
-3. **Both shown side by side.** The review screen renders "At proposal" vs "Now" with changed cells highlighted and a banner when there is drift. `GET /documents/{thread_id}` returns the same data.
-4. **Approve against a version.** The approval carries the `drift_hash` of the view the human looked at. The graph compares again at approval time: new drift the approver did not see returns `needs_re_review` and asks again; blocking drift is never saved.
-5. **Save guard.** `save_order` compares one last time right before `create_order`. The stock check inside the transaction stays the final guard.
+```text
+Propose (snapshot v1) → Review (at proposal vs now) → Approve v1 → Save re-checks price, customer and stock in one transaction
+```
+
+Human approval has its own timing gap. An order can wait in the review queue for an hour, and by then a price or the customer's credit limit may have changed; the approver would sign off on data that was only right when the proposal was drafted. Stock was already safe (`create_order` re-checks it inside the transaction). Since v1.2 price and customer data are safe in the same way:
+
+1. **Snapshot at proposal time.** `erp_check` records every value the decision depends on (catalogue price per line, customer status, address, credit limit and payment terms) with its source (`products.unit_price`, `customers.credit_limit`, ...) and the UTC time it was read. The snapshot gets a version number (1, 2, ...) and a hash of the decision-relevant values.
+2. **At proposal vs now.** `GET /documents/{thread_id}` re-reads the ERP and returns, per value, `at_proposal`, `now`, `source` and `changed`. The review screen shows both columns side by side with the source and highlights changed rows. If a decision-relevant value changed, the proposal is older than `PROPOSAL_TTL_HOURS` (default 24) or a change blocks the order, the screen shows a warning and **Refresh proposal** instead of **Approve**.
+3. **Approve a version.** The approve request names `proposal_version` and `proposal_hash`. Inside the transaction that saves the order, `create_order` locks the customer and product rows (`SELECT ... FOR UPDATE` on PostgreSQL), re-reads price and customer data, compares them with the snapshot and checks stock. If anything differs, nothing is written: the version is marked "stale, needs re-review", the rule check and the ERP check run again, and the next proposal version is created for the approver.
+4. **Idempotent approve.** A double click or a retry returns the saved order instead of creating a second one: a per-thread lock in the API, a unique constraint on `orders(thread_id, proposal_version)`, and a replay of the response.
+5. **Audit log.** `GET /documents/{thread_id}/audit` records who approved which version, the values at proposal time and at decision time, and why a version was marked stale (`proposed`, `approved`, `saved`, `stale`, `expired`, `refreshed`, `rejected`, `replayed`).
+
+Stock behaves as before: a drop that still covers the order is shown as informational; a drop below the quantity blocks the proposal and is refused again inside the transaction.
 
 ```mermaid
 sequenceDiagram
@@ -286,28 +311,31 @@ sequenceDiagram
     participant ERP as ERP (SQL)
 
     Graph->>ERP: erp_check: find_customer, check_stock, get_product_price
-    Graph->>Graph: store erp_snapshot (prices, stock, customer, 09:02 UTC)
-    Graph-->>API: interrupt: document, issues, snapshot, current, drift
+    Graph->>Graph: proposal v1: values + source + read time, hash
+    Graph-->>API: interrupt: document, issues, proposal v1, at proposal vs now
     Note over ERP: 10:00 a colleague raises the price of JWL-002
     Approver->>UI: opens the review at 10:14
     UI->>API: GET /documents/{thread_id}
-    API->>ERP: compare_with_current (read-only)
-    API-->>UI: snapshot vs current, drift [price JWL-002 warn], drift_hash
-    UI-->>Approver: "At proposal 18.00 · Now 20.00" highlighted
-    Approver->>UI: Approve
-    UI->>API: POST /review {approve: true, seen_drift_hash}
+    API->>ERP: re-read (read-only tools)
+    API-->>UI: values [price JWL-002: 18.00 → 20.00, changed], stale: true
+    UI-->>Approver: changed row highlighted, "Refresh proposal" instead of "Approve"
+    Approver->>UI: Refresh proposal
+    UI->>API: POST /refresh
+    API->>Graph: rule_check + erp_check again → proposal v2
+    Approver->>UI: Approve v2
+    UI->>API: POST /review {approve, proposal_version: 2, proposal_hash}
     API->>Graph: Command(resume=...)
-    Graph->>ERP: compare_with_current again
-    alt drift unchanged and nothing blocks
-        Graph->>ERP: save_order: last re-check, then create_order (atomic)
-        Graph-->>UI: status saved
-    else new drift or block
-        Graph-->>UI: status needs_re_review + new drift (nothing saved)
-        UI-->>Approver: table refreshes, asks again
+    Graph->>ERP: BEGIN; lock customer + products; compare with v2; check stock
+    alt unchanged
+        Graph->>ERP: INSERT order (thread_id, v2), stock -= qty; COMMIT
+        Graph-->>UI: status saved (+ audit: approved, saved)
+    else changed
+        Graph->>ERP: ROLLBACK
+        Graph-->>UI: status needs_re_review, proposal v3 (+ audit: stale)
     end
 ```
 
-Try it: process `err_wrong_total.txt`, then change a price in the database while the order waits, for example with `sqlite3 data/erp.db "UPDATE products SET unit_price = 20 WHERE sku = 'JWL-002'"`, and click **Re-check now** or **Approve**.
+Try it: process `err_wrong_total.txt`, then change a price or a credit limit in the database while the order waits, for example with `sqlite3 data/erp.db "UPDATE products SET unit_price = 20 WHERE sku = 'JWL-002'"`, and click **Re-check now**. The changed row lights up and **Approve** turns into **Refresh proposal**.
 
 Inspired by a discussion on LinkedIn about the timing gap in human approval.
 
@@ -368,13 +396,13 @@ Paste the table from `evals/results.md` between the markers above after running 
 
 **Why deterministic checks before the LLM?** Arithmetic and database lookups are cheap, exact and unit-tested, so they are the safety net: a wrong total or an unknown SKU is caught even when the model has a bad day. The agent adds judgement the rules cannot encode, such as a description that does not fit the SKU, and its findings are merged with, never replace, the deterministic ones. If the agent fails, the run is flagged for review rather than passing silently.
 
-**Why the LLM never calls `create_order`?** Writing into an order book is irreversible in practice. The model only gets the three read-only tools; the single write happens in the `save_order` node after validation and, if needed, human approval. `create_order` is atomic, so even an approved order with an unknown SKU or insufficient stock is refused.
+**Why the LLM never calls `create_order`?** Writing into an order book is irreversible in practice. The model only gets the three read-only tools; the single write happens in the `save_order` node after validation and, if needed, human approval. `create_order` is atomic and re-reads price, customer and stock against the approved proposal version, so even an approved order is refused when the ERP moved on, has an unknown SKU or lacks stock.
 
 **Why a hosted model instead of a local one?** I started with a local model through Ollama, because it is free and keeps documents on my own machine. On my laptop, though, one document took far too long: extraction plus the agent's tool-calling loop made several model calls, and each one was slow on local hardware. For a review workflow that a user waits on, that was not usable, so I switched to Gemini via its API for fast responses, and kept the model-agnostic `get_llm()` layer so the provider is one setting. A local model remains a valid option where data must not leave the company; it would need a GPU server instead of a laptop.
 
 **Why `json_schema` structured output?** Both vendors offer native constrained decoding. It is more reliable than prompting for JSON and avoids forced tool calls, which the current Anthropic models reject. The Pydantic field descriptions double as extraction instructions.
 
-**Limitations.** `MemorySaver` forgets paused runs on restart; use a SQLite or Postgres checkpointer in production. PDF reading is text-based, so scanned documents need OCR first. Customer matching is `difflib` fuzzy matching, fine for a demo but a real system would use master-data services. One currency (EUR) throughout.
+**Limitations.** `MemorySaver` forgets paused runs on restart; use a SQLite or Postgres checkpointer in production. Row locks (`SELECT ... FOR UPDATE`) are a no-op on SQLite, which serialises writers anyway; the value comparison and the unique constraint hold on both databases. PDF reading is text-based, so scanned documents need OCR first. Customer matching is `difflib` fuzzy matching, fine for a demo but a real system would use master-data services. One currency (EUR) throughout.
 
 ## Project structure
 
@@ -385,11 +413,13 @@ erp-agent/
 │   ├── llm.py           # get_llm(), PRICES, estimate_cost()  (only vendor imports)
 │   ├── schemas.py       # OrderLine, PurchaseDocument, Issue, ValidationResult, ProcessResult
 │   ├── db.py            # SQLAlchemy models + get_session()
-│   ├── seed.py          # python -m app.seed  (10 customers, 25 products)
+│   ├── seed.py          # python -m app.seed  (10 customers with credit limits, 25 products)
 │   ├── tools.py         # @tool find_customer, check_stock, get_product_price, create_order
 │   ├── extract.py       # load_document(), extract_document()
 │   ├── validate.py      # deterministic checks → list[Issue]
-│   ├── recheck.py       # approval re-check: snapshot, compare_with_current(), drift hash
+│   ├── snapshot.py      # proposal snapshot: values with source + time, hash, compare, expiry
+│   ├── recheck.py       # approval re-check: take_snapshot(), compare_with_current()
+│   ├── audit.py         # audit log: who approved which version, why one went stale
 │   ├── graph.py         # LangGraph StateGraph, build_graph(), run_document()
 │   ├── api.py           # FastAPI + web UI (app/static)
 │   └── mcp_server.py    # optional MCP server (read-only tools)

@@ -7,7 +7,17 @@ from app.tools import AGENT_TOOLS, check_stock, create_order, find_customer, get
 
 def test_find_customer_exact_and_fuzzy() -> None:
     exact = find_customer.invoke({"name": "Shree Ganesh Jewels"})
-    assert exact == {"found": True, "id": 1, "name": "Shree Ganesh Jewels", "city": "Surat"}
+    assert exact["found"] and (exact["id"], exact["name"], exact["city"]) == (
+        1,
+        "Shree Ganesh Jewels",
+        "Surat",
+    )
+    assert (exact["status"], exact["credit_limit"], exact["payment_terms"]) == (
+        "active",
+        15000.0,
+        "net 30",
+    )
+    assert exact["row_version"] == 1 and "Surat" in exact["address"]
     assert (
         find_customer.invoke({"name": "Rhein Textil Handel GmbH"})["name"] == "Rhein Textil Handel"
     )

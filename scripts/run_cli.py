@@ -4,9 +4,10 @@
     python scripts/run_cli.py data/sample_docs/err_over_stock.txt --provider anthropic
 
 Runs the graph on one document and prints a readable summary. If the run
-pauses for review it shows what changed in the ERP since the proposal ("then
-vs now"), asks "Approve? [y/N]" and resumes the graph. If the ERP changes
-again before the approval lands, the question is asked once more.
+pauses for review it shows the proposal version and what changed in the ERP
+since the proposal ("at proposal vs now"), asks "Approve? [y/N]" and resumes
+the graph with that version and hash. If the ERP changed, or the proposal
+expired, the graph produces the next version and the question is asked again.
 """
 
 from __future__ import annotations
@@ -57,13 +58,19 @@ def print_summary(result: ProcessResult, log: list[str]) -> None:
 
 
 def print_recheck(recheck: RecheckResult | None) -> None:
-    """Print the drift between proposal time and now, if any."""
+    """Print the proposal version and every value at proposal time vs now."""
     if recheck is None:
         return
-    if not recheck.drift:
-        print(f"\nERP re-check: no change since {recheck.snapshot_at}.")  # noqa: T201
-        return
-    print(f"\nERP changed since the proposal ({recheck.snapshot_at}):")  # noqa: T201
+    head = f"Proposal v{recheck.proposal_version} {recheck.proposal_hash} ({recheck.snapshot_at})"
+    print(f"\n{head}, expires {recheck.expires_at}")  # noqa: T201
+    for row in recheck.values:
+        label = f"{row.label} {row.sku}" if row.sku else row.label
+        mark = "  CHANGED" if row.changed else ""
+        print(  # noqa: T201
+            f"  {label:28} {str(row.at_proposal):>12} -> {str(row.now):>12}  [{row.source}]{mark}"
+        )
+    if recheck.expired:
+        print("  The proposal has expired and must be refreshed.")  # noqa: T201
     for item in recheck.drift:
         print(f"  - [{item.severity}] {item.message}")  # noqa: T201
 
@@ -83,15 +90,25 @@ def main(argv: list[str] | None = None) -> int:
 
     while pending_interrupt(state) is not None:
         print_recheck(result.recheck)
-        if result.recheck is not None and result.recheck.blocked:
-            print("\nA blocking change prevents saving; the order can only be rejected.")  # noqa: T201
-            approve = False
+        recheck, proposal = result.recheck, result.proposal
+        if recheck is not None and recheck.needs_refresh:
+            if args.yes or input("\nRefresh the proposal? [y/N] ").strip().lower() in {"y", "yes"}:
+                action = "refresh"
+            else:
+                action = "reject"
         else:
             approve = args.yes or input("\nApprove? [y/N] ").strip().lower() in {"y", "yes"}
-        seen = result.recheck.drift_hash if result.recheck is not None else None
-        result, state = resume_document(graph, thread_id, approve, seen_drift_hash=seen)
+            action = "approve" if approve else "reject"
+        result, state = resume_document(
+            graph,
+            thread_id,
+            action=action,
+            proposal_version=proposal.version if proposal else None,
+            proposal_hash=proposal.hash if proposal else None,
+            actor="cli",
+        )
         print("\nAfter review:")  # noqa: T201
-        for entry in state.get("log", [])[-2:]:
+        for entry in state.get("log", [])[-3:]:
             print(f"  {entry}")  # noqa: T201
 
     print(

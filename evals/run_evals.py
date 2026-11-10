@@ -177,7 +177,7 @@ def evaluate_document(graph: Any, provider: str, item: dict[str, Any]) -> DocRes
     latency = time.perf_counter() - started
 
     if pending_interrupt(state) is not None:
-        resume_document(graph, thread_id, approve=False)  # measure only, never save
+        resume_document(graph, thread_id, action="reject")  # measure only, never save
 
     issues = list(result.issues) if result else []
     if result and result.status == "error" and not error:
